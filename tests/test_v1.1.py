@@ -8,7 +8,10 @@ import os
 from pathlib import Path
 
 # 添加脚本目录到路径
-sys.path.insert(0, str(Path(__file__).parent))
+# 仓库整理后被测模块位于 ../src 与 ../legacy,补齐导入路径,保证开箱可运行
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO_ROOT / "src"))
+sys.path.insert(0, str(_REPO_ROOT / "legacy"))
 
 from v1_1_config import *
 from v1_1_helpers import *

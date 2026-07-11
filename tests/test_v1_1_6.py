@@ -2,13 +2,20 @@
 """
 Memory System v1.1.6 测试
 测试 Crabby 指出的三个问题的修复
+
+⚠️ 已知状态（2026-07）：当前 11/17 通过。
+v1.1.6 的"冲突柔性降权"在 v1.3.0 引入 MemoryOperator/ConflictResolver
+接管去重路径后已回归，6 个降权/去重用例失败，详见 tests/README.md。
 """
 
 import sys
 import os
 
 # 添加脚本目录到路径
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# 仓库整理后被测模块位于 ../src 与 ../legacy,补齐导入路径,保证开箱可运行
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
+sys.path.insert(0, os.path.join(_REPO_ROOT, "legacy"))
 
 from memory import (
     extract_entities,

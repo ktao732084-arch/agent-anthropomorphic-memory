@@ -12,7 +12,10 @@ import tempfile
 import shutil
 
 # 导入新的后端
-sys.path.insert(0, str(Path(__file__).parent))
+# 仓库整理后被测模块位于 ../src 与 ../legacy,补齐导入路径,保证开箱可运行
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO_ROOT / "src"))
+sys.path.insert(0, str(_REPO_ROOT / "legacy"))
 from sqlite_backend_v1_2_5 import SQLiteBackend, DecayCalculator
 
 

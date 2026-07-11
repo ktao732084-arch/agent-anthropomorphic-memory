@@ -6,7 +6,10 @@ Memory System v1.1.7 - LLM 深度集成测试
 import sys
 import os
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# 仓库整理后被测模块位于 ../src 与 ../legacy,补齐导入路径,保证开箱可运行
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
+sys.path.insert(0, os.path.join(_REPO_ROOT, "legacy"))
 
 from v1_1_7_llm_integration import (
     detect_semantic_complexity,
