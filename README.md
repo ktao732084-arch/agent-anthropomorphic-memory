@@ -1,6 +1,6 @@
 # Memory System — AI Agent 持久化记忆系统
 
-> 一个受神经科学启发的 AI Agent 记忆系统，支持三层存储、混合检索、自动衰减和记忆整合。
+> 一个受神经科学启发的 AI Agent 记忆系统，支持三层存储、关键词+实体检索（可选 QMD/BM25 增强）、时间驱动的指数衰减和 7 阶段记忆整合。
 
 ![stars](https://img.shields.io/github/stars/ktao732084-arch/openclaw_memory_supersystem-v1.0)
 ![license](https://img.shields.io/github/license/ktao732084-arch/openclaw_memory_supersystem-v1.0)
@@ -23,36 +23,39 @@
 | v1.2.2 | 2026-02-12 | Mini-Consolidate 白天轻量检查 + pending.jsonl 缓冲区 + Hot Store 优先检索 |
 | v1.2.3 | 2026-02-13 | `export-qmd --auto-reload` 自动更新 QMD 索引 |
 | v1.2.4 | 2026-02-14 | SQLite 后端替换 JSONL 主存储，WAL 模式 + 并发安全 + 迁移工具 |
-| v1.3.0 | 2026-02-14 | Memory Operator（ADD/UPDATE/DELETE/NOOP，92.9% 准确率）+ 冲突消解协议 + 虚假记忆过滤 + 全模块降级兜底 |
-| v1.4.0 | 2026-02-23 | 时序引擎（TemporalQueryEngine + FactEvolutionTracker + EvidenceTracker）+ 时序查询前置路由 |
+| v1.3.0 | 2026-02-14 | Memory Operator（ADD/UPDATE/DELETE/NOOP 决策）+ 冲突消解协议 + 虚假记忆过滤（noise_filter 内置冒烟测试 13/14 通过，尚无独立评测集）+ 全模块降级兜底 |
+| v1.4.0 | 2026-02-23 | 时序引擎（TemporalQueryEngine + FactEvolutionTracker + EvidenceTracker）+ 时序查询前置路由（该模块尚未随本仓库开源，主流程会自动降级跳过） |
 
-## 当前架构 (v1.4.0)
+## 当前架构（仓库实际内容）
 
 ```
-memory.py                    # 主入口 + CLI
+src/
+├── memory.py                # 主入口 + CLI + 存储（JSONL 分层）+ 检索
+│                            #   （关键词倒排 + 实体索引 + 可选 QMD/BM25）
+│                            #   + 7 阶段 Consolidation + 指数衰减
 │
-├── 存储层
-│   ├── sqlite_backend.py    # SQLite 主存储
-│   ├── backend_adapter.py   # 存储抽象层
-│   └── scaled_backend.py    # 阈值缩放
+├── 智能层（被 memory.py 主流程使用）
+│   ├── noise_filter.py      # 虚假记忆/废话过滤
+│   ├── memory_operator.py   # ADD/UPDATE/DELETE/NOOP 决策器
+│   └── conflict_resolver.py # 冲突检测与消解
 │
-├── 检索层
-│   ├── hybrid_search.py     # 混合检索（关键词 + 向量）
-│   ├── sharded_index.py     # 分片向量索引
-│   ├── async_indexer.py     # 异步索引更新
-│   └── cache_manager.py     # 多级缓存
-│
-├── 智能层
-│   ├── noise_filter.py      # 废话过滤
-│   ├── memory_operator.py   # CRUD 操作器
-│   ├── conflict_resolver.py # 冲突检测与消解
-│   ├── temporal_engine.py   # 时序引擎
-│   ├── proactive_engine.py  # 主动记忆引擎
-│   └── proactive_executor.py
+├── 备用/实验路径（未接入主流程）
+│   ├── sqlite_backend.py    # SQLite 后端（供 benchmark 与并发测试使用）
+│   ├── backend_adapter.py   # JSONL/SQLite 双后端适配器（同上）
+│   ├── schema_v1_3_0.py     # v1.3.0 数据结构定义（暂无调用方）
+│   └── benchmark.py         # JSONL vs SQLite 后端性能对比脚本
 │
 └── 数据采集
-    └── collect_from_sessions.py
+    └── collect_from_sessions.py  # 从 OpenClaw 会话转录提取 pending 记忆
+
+legacy/                      # v1.1.x 时代模块（实体系统、LLM 集成等），
+                             # 置于 PYTHONPATH 时 memory.py 会自动启用增强功能
 ```
+
+> **如实说明**：v1.4.0+ 迭代中在作者本机开发的部分模块（temporal_engine、
+> hybrid_search/向量检索、proactive_engine/executor、scaled_backend、
+> cache_manager、dashboard 等）**尚未随本仓库开源**。memory.py 对它们均做了
+> try-import 优雅降级，缺失时相应命令不注册、相应阶段自动跳过，核心流程不受影响。
 
 ---
 
@@ -68,16 +71,17 @@ memory.py                    # 主入口 + CLI
 
 ### 一张图看懂：传统方案 vs Memory System v1.0
 
-| 指标 | 传统方案（MEMORY.md） | Memory System v1.0 | 效果 |
+| 指标 | 传统方案（MEMORY.md） | Memory System | 效果 |
 |------|----------------------|-------------------|------|
-| **每次对话Token消耗** | 3000-8000 tokens | <2000 tokens | **↓ 60-75%** |
-| **检索精准度** | ~60%（相关但无用） | ~90%（精准命中） | **↑ 50%** |
+| **每次对话Token消耗** | 全量注入，随使用无上限增长 | Layer 1 快照有 2000 token 预算上限 | 可控 |
+| **检索方式** | 全文肉眼扫 / 简单 grep | 关键词倒排 + 实体索引 + 可选 QMD(BM25) | 结构化检索 |
 | **记忆分类** | ❌ 全部混在一起 | ✅ Fact/Belief/Summary | 结构化 |
-| **自动衰减** | ❌ 手动清理 | ✅ 按类型自动衰减 | 自维护 |
+| **自动衰减** | ❌ 手动清理 | ✅ 按类型指数衰减 | 自维护 |
 | **元认知能力** | ❌ 无法区分确定/不确定 | ✅ 置信度0-1标注 | 更像人 |
 | **记忆整合** | ❌ 无 | ✅ 7阶段Consolidation | 自动梳理 |
 
-> **简单说**：Token省了一大半，检索准了一大截，还能自动整理、自动遗忘、区分"我确定"和"我猜的"。
+> **简单说**：Token 有预算上限，检索走索引，还能自动整理、自动遗忘、区分"我确定"和"我猜的"。
+> （检索精准度、Token 节省比例等早期版本宣称的具体百分比缺乏可复现评测支撑，已移除。）
 
 ---
 
@@ -217,21 +221,23 @@ memory.py                    # 主入口 + CLI
 
 不同类型的记忆，衰减速度不同：
 
-| 类型 | 衰减率 | 半衰期 | 设计理由 |
+| 类型 | 基础衰减率 | 基础半衰期 | 设计理由 |
 |------|--------|--------|---------|
 | Fact | 0.008 | ~87天 | 事实相对稳定 |
 | Belief | 0.07 | ~10天 | 推断需要快速验证或遗忘 |
 | Summary | 0.025 | ~28天 | 摘要有中等时效性 |
-| Event | 0.15 | ~5天 | 原始事件快速衰减 |
 
-衰减公式：
+衰减公式（与代码实现一致，见 memory.py Consolidation Phase 5c）：
 ```python
-新权重 = 旧权重 × e^(-衰减率 × 天数)
+有效衰减率 = 基础衰减率 × (1 - importance × 0.5)   # 重要性保护：importance=1 时衰减率减半
+新权重     = 旧权重 × e^(-有效衰减率 × 天数)
+# 天数 = 距 max(上次衰减, 上次访问, 创建时间) 的实际天数
+# —— 时间驱动而非运行次数驱动；最近被访问的记忆衰减时钟会重置（访问保护）
 ```
 
-这意味着：
-- 一个Belief如果10天没被访问或验证，权重会降到50%
-- 一个Fact即使3个月不用，权重还有50%
+这意味着（以 importance=0.5 为例，有效衰减率为基础值的 0.75 倍）：
+- 一个Belief如果约13天没被访问或验证，权重会降到50%
+- 一个Fact即使3个多月不用，权重还有50%以上
 
 ---
 
@@ -269,23 +275,22 @@ Phase 1: 收集 ──→ Phase 2: 筛选 ──→ Phase 3: 提取
 
 ### 关键Phase详解
 
-#### Phase 2: 筛选（用LLM判断价值）
+#### Phase 2: 筛选（规则优先，LLM 兜底可选）
 
-不是所有对话都值得记住。这个阶段用LLM判断：
+不是所有对话都值得记住。这个阶段**默认用规则打分**（关键词类别 + 重要性阈值，
+0 Token），只有配置了 API Key 且规则打分落在模糊区间时才调用 LLM 兜底判断：
 
 ```
-输入: "今天天气真好"
-输出: { "dominated": true, "reason": "闲聊，无长期价值" }
-
-输入: "我下周三有个重要考试"
-输出: { "dominated": false, "reason": "时间敏感事件，需要记住" }
+输入: "今天天气真好"     → 规则判定: 噪声/低重要性，过滤
+输入: "我下周三有个重要考试" → 规则判定: 时间敏感事件，保留
 ```
 
-#### Phase 4b: Belief验证
+#### Phase 4b: Belief验证（纯规则实现）
 
-这是"元认知"的核心。对于每个Belief，系统会：
+这是"元认知"的核心。对于每个Belief，系统会（基于代码规则比对 Facts，
+不调用 LLM，见 `code_verify_belief`）：
 
-1. 检查是否有新证据支持/反驳
+1. 检查是否有新证据（Facts）支持/反驳
 2. 更新置信度
 3. 如果置信度>0.85，考虑升级为Fact
 4. 如果置信度<0.2，标记为待删除
@@ -324,46 +329,42 @@ Phase 1: 收集 ──→ Phase 2: 筛选 ──→ Phase 3: 提取
 ### 文件结构
 
 ```
-memory-system-skill/
+openclaw_memory_supersystem/
 ├── SKILL.md                 # 使用文档
-├── scripts/
-│   └── memory.py            # 核心CLI（500+行Python）
-├── prompts/
-│   ├── filter.md            # Phase 2 筛选Prompt
-│   ├── extract.md           # Phase 3 提取Prompt
-│   ├── verify_belief.md     # Phase 4b 验证Prompt
-│   └── snapshot.md          # Phase 7 快照Prompt
-└── templates/
-    └── config.json          # 默认配置
+├── src/
+│   └── memory.py            # 核心CLI（4500+行Python）
+├── prompts/                 # 早期外置 Prompt（现已内联进 memory.py，留档参考）
+├── templates/
+│   └── config.json          # 默认配置
+└── tests/                   # 单元/并发测试（运行方式见 tests/README.md）
 ```
 
 ### 核心命令
 
 ```bash
 # 初始化记忆系统
-python memory.py init
+python3 src/memory.py init
 
-# 添加一条记忆
-python memory.py capture --type fact --content "用户是医学生" --confidence 0.95
+# 添加一条记忆（content 为位置参数）
+python3 src/memory.py capture --type fact "用户是医学生"
 
-# 运行Consolidation
-python memory.py consolidate
+# 运行Consolidation（Phase 7 会自动生成 Layer 1 快照）
+python3 src/memory.py consolidate
 
-# 查看状态
-python memory.py status
+# 检索
+python3 src/memory.py search "医学生"
 
-# 生成Layer 1快照
-python memory.py snapshot
+# 查看状态 / 校验数据完整性
+python3 src/memory.py status
+python3 src/memory.py validate
 ```
 
-### 性能对比：传统方案 vs Memory System v1.0
+### 性能说明
 
-| 指标 | 传统方案（MEMORY.md） | Memory System v1.0 |
-|------|----------------------|-------------------|
-| 单条记忆添加 | 即时追加，无处理 | ~39ms |
-| 100条记忆整理 | ❌ 无（手动清理） | ~51ms |
-| Layer 1快照 | 全量注入 | ~690 tokens |
-| 存储空间 (100条) | ~200KB | 64KB |
+核心操作（capture / consolidate / search）为纯 Python 标准库 + 本地文件读写，
+百条量级下均为毫秒级、无感延迟。早期文章版本曾列出具体毫秒/Token 数字，
+但对应的测量脚本未保留，无法复现，故此处不再引用；仓库内现有的
+`src/benchmark.py` 只做 JSONL vs SQLite 后端的相对性能对比，可自行运行验证。
 
 ---
 

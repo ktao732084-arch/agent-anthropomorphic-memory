@@ -1,7 +1,7 @@
 ---
 name: memory-system
-version: 1.1.7
-description: 三层记忆架构系统，模拟人类记忆机制。自动提取、结构化存储、智能衰减、动态快照。v1.1.7 新增 LLM 深度集成、语义复杂度检测、智能触发策略。
+version: 1.4.0
+description: 三层记忆架构系统，模拟人类记忆机制。自动提取、结构化存储、时间驱动指数衰减、动态快照。含 7 阶段 Consolidation、Fact/Belief 分类、噪声过滤与冲突消解（版本历史见 README）。
 metadata:
   clawdbot:
     emoji: "🧠"
@@ -10,11 +10,11 @@ metadata:
     install:
       - id: "init"
         kind: "script"
-        command: "python3 scripts/memory.py init"
+        command: "python3 src/memory.py init"
         label: "初始化记忆系统目录结构"
 ---
 
-# Memory System v1.1.7 — 三层记忆架构
+# Memory System v1.4.0 — 三层记忆架构
 
 > **让 AI 从金鱼变成大象。**
 
@@ -355,7 +355,7 @@ score < 0.05 → 移入 archive/（冷藏，不再参与检索）
 
 ## ⚠️ LLM 配置（重要）
 
-v1.1.7 引入了 LLM 深度集成，需要配置 API Key 才能启用智能功能。
+v1.1.7 起引入 LLM 深度集成，需要配置 API Key 才能启用智能功能（未配置时全部功能规则驱动、优雅降级）。
 
 ### 配置 API Key
 
@@ -408,33 +408,33 @@ export MEMORY_LLM_ENABLED="false"
 
 ```bash
 # 创建目录结构和默认配置
-python3 scripts/memory.py init
+python3 src/memory.py init
 ```
 
 ### 手动执行 Consolidation
 
 ```bash
 # 完整流程
-python3 scripts/memory.py consolidate
+python3 src/memory.py consolidate
 
 # 强制执行（忽略时间检查）
-python3 scripts/memory.py consolidate --force
+python3 src/memory.py consolidate --force
 
 # 只执行某个阶段（调试用）
-python3 scripts/memory.py consolidate --phase 2
+python3 src/memory.py consolidate --phase 2
 ```
 
 ### 手动添加记忆
 
 ```bash
 # 添加 fact
-python3 scripts/memory.py capture "用户对花生过敏" \
+python3 src/memory.py capture "用户对花生过敏" \
   --type fact \
   --importance 1.0 \
   --entities "用户"
 
 # 添加 belief
-python3 scripts/memory.py capture "用户可能喜欢咖啡" \
+python3 src/memory.py capture "用户可能喜欢咖啡" \
   --type belief \
   --confidence 0.6 \
   --importance 0.5
@@ -444,10 +444,10 @@ python3 scripts/memory.py capture "用户可能喜欢咖啡" \
 
 ```bash
 # 系统状态
-python3 scripts/memory.py status
+python3 src/memory.py status
 
 # 统计信息
-python3 scripts/memory.py stats
+python3 src/memory.py stats
 
 # 输出示例:
 # 📊 Memory System Stats
@@ -474,13 +474,13 @@ python3 scripts/memory.py stats
 
 ```bash
 # 重建索引
-python3 scripts/memory.py rebuild-index
+python3 src/memory.py rebuild-index
 
 # 验证数据完整性
-python3 scripts/memory.py validate
+python3 src/memory.py validate
 
 # 手动归档
-python3 scripts/memory.py archive <memory_id>
+python3 src/memory.py archive <memory_id>
 ```
 
 ---
@@ -554,7 +554,7 @@ python3 scripts/memory.py archive <memory_id>
 {
   "name": "Memory Consolidation",
   "schedule": {"kind": "cron", "expr": "0 3 * * *"},
-  "payload": {"kind": "systemEvent", "text": "执行记忆整合: python3 scripts/memory.py consolidate"},
+  "payload": {"kind": "systemEvent", "text": "执行记忆整合: python3 src/memory.py consolidate"},
   "sessionTarget": "main"
 }
 ```
@@ -566,7 +566,7 @@ python3 scripts/memory.py archive <memory_id>
 ```markdown
 ## Memory Consolidation 检查
 如果距离上次 Consolidation > 48 小时：
-  执行 `python3 scripts/memory.py consolidate`
+  执行 `python3 src/memory.py consolidate`
 ```
 
 ### 4. 配置检索规则
@@ -632,7 +632,13 @@ python3 scripts/memory.py archive <memory_id>
 
 ## 版本历史
 
-### v1.1.7（当前）
+### v1.2.0 ~ v1.4.0（当前）
+- [x] 噪声前置过滤 + inject 动态注入 + QMD(BM25) 集成（v1.2.x）
+- [x] Memory Operator + 冲突消解协议 + 虚假记忆过滤（v1.3.0）
+- [x] 时间驱动指数衰减修正 + 中文索引 2-gram 修复（v1.4.x）
+- 完整版本表见 README.md
+
+### v1.1.7
 - [x] LLM 深度集成：语义复杂度检测 + 智能触发 + 失败回退
 - [x] 扩大 LLM 触发区间：0.2~0.5（原 0.2~0.3）
 - [x] API Key 多源获取：环境变量 → 配置文件 → 参数传入
@@ -700,4 +706,4 @@ python3 scripts/memory.py archive <memory_id>
 
 ---
 
-**Memory System v1.1.7 — 让 AI 拥有真正的记忆。** 🧠
+**Memory System v1.4.0 — 让 AI 拥有真正的记忆。** 🧠
