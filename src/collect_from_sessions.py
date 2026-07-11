@@ -4,19 +4,24 @@
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 from datetime import datetime, timedelta
 import hashlib
 
 def get_workspace():
-    """获取工作空间路径"""
-    workspace = os.environ.get('WORKSPACE', '/root/.openclaw/workspace')
+    """获取工作空间路径(WORKSPACE 环境变量优先,默认 ~/.openclaw/workspace)"""
+    workspace = os.environ.get('WORKSPACE', os.path.expanduser('~/.openclaw/workspace'))
     return Path(workspace)
 
 def get_sessions_dir():
-    """获取对话转录本目录"""
-    return Path('/root/.openclaw/agents/main/sessions')
+    """获取对话转录本目录(OPENCLAW_SESSIONS_DIR 环境变量优先)"""
+    sessions_dir = os.environ.get(
+        'OPENCLAW_SESSIONS_DIR',
+        os.path.expanduser('~/.openclaw/agents/main/sessions'),
+    )
+    return Path(sessions_dir)
 
 def get_memory_dir():
     """获取记忆系统目录"""
@@ -129,12 +134,12 @@ def collect_from_sessions(hours=24, dry_run=False):
     memory_dir = get_memory_dir()
     
     if not sessions_dir.exists():
-        print("❌ 对话目录不存在")
-        return
+        print(f"❌ 对话目录不存在: {sessions_dir}")
+        return -1
     
     if not memory_dir.exists():
         print("❌ 记忆系统未初始化")
-        return
+        return -1
     
     # 加载现有 pending
     pending = load_pending(memory_dir)
@@ -201,7 +206,6 @@ def collect_from_sessions(hours=24, dry_run=False):
 
 if __name__ == '__main__':
     import argparse
-    import os
     
     parser = argparse.ArgumentParser(description='从对话转录本收集记忆')
     parser.add_argument('--hours', type=int, default=24, help='收集最近 N 小时的对话 (默认 24)')
