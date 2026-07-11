@@ -2900,25 +2900,54 @@ def cmd_consolidate(args):
                     f"       保留: {cleanup_stats['exact_remaining']} 实体, {cleanup_stats['patterns_remaining']} 模式"
                 )
 
-            # 5c: 衰减(含访问保护)
+            # 5c: 衰减(v1.4.1: 时间驱动的指数衰减,含访问保护)
+            #
+            # score *= e^(-effective_rate × days)
+            #   - days = 距离衰减时钟参考点的天数,参考点取
+            #     max(last_decayed, last_accessed, created):
+            #     · last_decayed 保证多次运行不重复扣减(时间驱动而非次数驱动)
+            #     · last_accessed 提供访问保护——最近被访问的记忆衰减时钟重置
+            #   - effective_rate = decay_rate × (1 - importance × 0.5)
+            #     importance=1.0 的记忆衰减率减半(重要性保护)
+            # 半衰期(importance=0.5 时): fact≈116天 / belief≈13天 / summary≈37天
             print("   5c: 衰减更新")
+            import math as _math
+
             archived_count = 0
+            _now_dt = datetime.utcnow()
+
+            def _parse_ts(ts):
+                if not ts:
+                    return None
+                try:
+                    return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).replace(tzinfo=None)
+                except (ValueError, TypeError):
+                    return None
+
             for mem_type in ["facts", "beliefs", "summaries"]:
                 active_path = memory_dir / f"layer2/active/{mem_type}.jsonl"
                 archive_path = memory_dir / f"layer2/archive/{mem_type}.jsonl"
 
                 records = load_jsonl(active_path)
 
-                # v1.1.4: 应用访问保护衰减
-                if V1_1_ENABLED:
-                    records = phase6_decay_with_access_protection(records, config)
-                else:
-                    # v1.1.3 原始衰减逻辑
-                    decay_rate = decay_rates.get(mem_type.rstrip("s"), 0.01)
-                    for r in records:
-                        importance = r.get("importance", 0.5)
-                        actual_decay = decay_rate * (1 - importance * 0.5)
-                        r["score"] = r.get("score", importance) * (1 - actual_decay)
+                decay_rate = decay_rates.get(mem_type.rstrip("s"), 0.01)
+                for r in records:
+                    candidates = [
+                        _parse_ts(r.get("last_decayed")),
+                        _parse_ts(r.get("last_accessed")),
+                        _parse_ts(r.get("created")),
+                    ]
+                    candidates = [c for c in candidates if c is not None]
+                    if candidates:
+                        ref_dt = max(candidates)
+                        days = max(0.0, (_now_dt - ref_dt).total_seconds() / 86400)
+                    else:
+                        days = 0.0  # 无任何时间戳:只打点,不衰减
+
+                    importance = r.get("importance", 0.5)
+                    effective_rate = decay_rate * (1 - importance * 0.5)
+                    r["score"] = r.get("score", importance) * _math.exp(-effective_rate * days)
+                    r["last_decayed"] = now_iso()
 
                 remaining = []
                 to_archive = []
@@ -2958,10 +2987,16 @@ def cmd_consolidate(args):
                     if len(word) > 1:
                         keywords.add(word.lower())
 
-                # 2. 提取中文词组(2字以上)
-                chinese_words = re.findall(r"[\u4e00-\u9fa5]{2,}", text)
-                for word in chinese_words:
-                    keywords.add(word)
+                # 2. 中文:整段 + 2-gram(v1.4.1 修复)
+                #    旧版把整句连续中文当作单个索引键,导致查询"医学生"
+                #    永远匹配不到索引键"用户是医学生"。
+                #    现在对每段连续中文同时索引整段(支持全短语查询)和
+                #    2-gram,与 keyword_search 查询端的 2-4 字子串切分保证有交集。
+                chinese_runs = re.findall(r"[\u4e00-\u9fa5]{2,}", text)
+                for run in chinese_runs:
+                    keywords.add(run)
+                    for i in range(len(run) - 1):
+                        keywords.add(run[i : i + 2])
 
                 # 3. 提取纯英文单词(不含连字符的)
                 english_words = re.findall(r"\b[a-zA-Z]{2,}\b", text)
@@ -3262,35 +3297,6 @@ def cmd_rebuild_index(args):
     args.phase = 6
     args.force = True
     cmd_consolidate(args)
-
-
-def cmd_validate(args):
-    """验证数据完整性"""
-    memory_dir = get_memory_dir()
-    print("🔍 验证数据完整性...")
-
-    errors = []
-
-    # 检查目录结构
-    required_dirs = ["layer1", "layer2/active", "layer2/archive", "layer2/entities", "layer2/index", "state"]
-    for d in required_dirs:
-        if not (memory_dir / d).exists():
-            errors.append(f"缺少目录: {d}")
-
-    # 检查 JSONL 文件格式
-    for mem_type in ["facts", "beliefs", "summaries"]:
-        for pool in ["active", "archive"]:
-            path = memory_dir / f"layer2/{pool}/{mem_type}.jsonl"
-            if path.exists():
-                try:
-                    records = load_jsonl(path)
-                    for i, r in enumerate(records):
-                        if "id" not in r:
-                            errors.append(f"{path}:{i + 1} 缺少 id 字段")
-                        if "content" not in r:
-                            errors.append(f"{path}:{i + 1} 缺少 content 字段")
-                except Exception as e:
-                    errors.append(f"{path} 解析失败: {e}")
 
 
 # ============================================================
