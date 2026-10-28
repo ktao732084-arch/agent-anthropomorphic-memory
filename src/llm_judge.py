@@ -88,10 +88,12 @@ def parse_decision(text: str, n_candidates: int) -> Optional[Dict]:
     decision = str(data.get("decision", "")).upper()
     if decision not in DECISIONS:
         return None
-    try:
-        targets = sorted({int(t) for t in data.get("targets") or []})
-    except (TypeError, ValueError):
+    values = data.get("targets") or []
+    if not isinstance(values, list) or any(
+        type(t) is not int and not (isinstance(t, str) and re.fullmatch(r"[0-9]+", t)) for t in values
+    ):
         return None
+    targets = sorted({int(t) for t in values})
     if any(t < 1 or t > n_candidates for t in targets):
         return None
     if decision != "ADD" and not targets:
@@ -116,9 +118,14 @@ class LLMJudge:
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.settings['api_key']}"},
         )
         with urllib.request.urlopen(req, timeout=60) as resp:
-            message = json.loads(resp.read().decode("utf-8"))["choices"][0]["message"]
-        # 兼容思考模型：content 为空时取 reasoning_content
-        return message.get("content") or message.get("reasoning_content") or ""
+            raw = resp.read(1024 * 1024 + 1)
+            if len(raw) > 1024 * 1024:
+                raise ValueError("LLM response exceeds limit")
+            choice = json.loads(raw.decode("utf-8"))["choices"][0]
+        if choice.get("finish_reason") in ("length", "content_filter"):
+            raise ValueError("LLM decision was not completed")
+        # Only a final answer can invalidate memories; reasoning is not a verdict.
+        return choice["message"].get("content") or ""
 
     def judge(self, new: Dict, candidates: List[Dict]) -> Optional[Dict]:
         """

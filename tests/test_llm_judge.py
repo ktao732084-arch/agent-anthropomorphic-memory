@@ -95,6 +95,9 @@ def main():
         ('{"decision": "SUPERSEDE", "targets": [4]}', 3, None),  # 编号越界
         ('{"decision": "SUPERSEDE", "targets": []}', 3, None),  # 缺少目标
         ('{"decision": "MAYBE", "targets": [1]}', 3, None),
+        ('{"decision": "SUPERSEDE", "targets": [true]}', 3, None),
+        ('{"decision": "SUPERSEDE", "targets": [1.9]}', 3, None),
+        ('{"decision": "SUPERSEDE", "targets": "12"}', 3, None),
         ("不是 JSON", 3, None),
     ]
     bad = [(t, got) for t, n, want in cases if ((got := parse_decision(t, n)) or {}).get("decision") != want]
