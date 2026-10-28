@@ -68,9 +68,17 @@ def test_dedup_ratio_threshold():
         # 短句：3/10 = 30% 重叠，应该去重
         {
             "name": "短句高重叠",
+            "new": {"id": "f_new", "content": "张三很喜欢吃苹果", "entities": ["张三"], "importance": 0.8, "score": 0.8},
+            "existing": [{"id": "f_old", "content": "张三喜欢吃苹果", "entities": ["张三"], "importance": 0.5, "score": 0.5}],
+            "expect_dedup": True,  # 只多了一个"很"，是同一件事
+        },
+        # 换词：重叠率同样很高，但苹果和香蕉是两个不同的事实，合并会丢信息
+        # （原先此处期望苹果/香蕉被合并，与评测集 no_conflict 类冲突，2026-10 改为不合并）
+        {
+            "name": "换词不去重",
             "new": {"id": "f_new", "content": "张三喜欢吃苹果", "entities": ["张三"], "importance": 0.8, "score": 0.8},
             "existing": [{"id": "f_old", "content": "张三喜欢吃香蕉", "entities": ["张三"], "importance": 0.5, "score": 0.5}],
-            "expect_dedup": True,  # 重叠词：张三、喜欢、吃 = 3/5 = 60%
+            "expect_dedup": False,
         },
         # 长句：3/50 = 6% 重叠，不应该去重
         {

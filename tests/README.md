@@ -19,10 +19,10 @@ python3 src/temporal.py        # 相对时间换算自测
 |------|---------|------|
 | test_v1.1.py | legacy/v1_1_config + v1_1_helpers（重要性分级、时间敏感） | ✅ 全部通过 |
 | test_v1_1_5.py | legacy/v1_1_5_entity_system（三层实体识别） | ✅ 8/8 |
-| test_v1_1_6.py | src/memory.py（引号实体、去重阈值、冲突降权） | ✅ 17/17 |
+| test_v1_1_6.py | src/memory.py（引号实体、去重阈值、冲突降权） | ✅ 18/18 |
 | test_v1_1_7.py | legacy/v1_1_7_llm_integration（语义复杂度、LLM 兜底） | ✅ 29/29 |
 | test_concurrent.py | legacy/sqlite_backend_v1_2_5（线程安全） | ✅ 全部通过 |
-| test_dedup_regression.py | src/memory.py + memory_operator（无实体修正、完全重复、同批次去重、误合并） | ✅ 5/5 |
+| test_dedup_regression.py | src/memory.py + memory_operator（无实体修正、完全重复、同批次去重、误合并、换词不合并、实体不同的更正、合并保留完整说法） | ✅ 8/8 |
 | test_agent_features.py | CLI 端到端（时间落地、更正失效归档、history、search --json、get、过期归档） | ✅ 6/6 |
 
 ## 已修复的回归（2026-10）

@@ -6,6 +6,7 @@ Memory System v1.3.0 - Memory Operator
 
 import re
 import json
+from difflib import SequenceMatcher
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 
@@ -52,7 +53,7 @@ class MemoryOperator:
     ]
     # Tier 2: 中置信度修正 → 旧记忆弱降权
     OVERRIDE_SIGNALS_TIER2 = [
-        '逗你的', '开玩笑', '骗你的', '瞎说的', '胡说', '说错了', '说反了', '搞错了', '弄错了',
+        '逗你的', '开玩笑', '骗你的', '瞎说的', '胡说', '说错了', '说反了', '搞错了', '弄错了', '不对',
     ]
 
     def __init__(
@@ -156,8 +157,12 @@ class MemoryOperator:
             self.stats['delete'] += 1
             return ('DELETE', target)
         
-        # 2.3 无修正信号但高度相似 → 合并
-        if target is not None and similarity >= self.similarity_threshold:
+        # 2.3 无修正信号、高度相似、且不是换词（张三→李四、花生→花粉是不同的事实）→ 合并
+        if (
+            target is not None
+            and similarity >= self.similarity_threshold
+            and not self._is_substitution(new_memory['content'], target['content'])
+        ):
             self.stats['update'] += 1
             return ('UPDATE', target)
         
@@ -192,20 +197,15 @@ class MemoryOperator:
         """
         找出与新记忆最相似的旧记忆
         
-        两边都有实体且没有交集时跳过；任一边没有实体（实体提取未启用或没提取到）
-        时照常比较，避免实体为空导致所有比较被跳过。
+        不按实体过滤：更正时变的往往正是实体本身（Java → Go、北京 → 上海）；
+        不同实体被误合并的情况由 _is_substitution 拦住。
         
         Returns:
             (最相似的旧记忆, 相似度)；没有可比较的记忆时返回 (None, 0.0)
         """
         best, best_sim = None, 0.0
-        new_entities = set(new_memory.get('entities') or [])
         
         for old in existing_memories:
-            old_entities = set(old.get('entities') or [])
-            if new_entities and old_entities and not (new_entities & old_entities):
-                continue
-            
             sim = self._calculate_similarity(new_memory['content'], old['content'])
             if sim > best_sim:
                 best, best_sim = old, sim
@@ -245,6 +245,17 @@ class MemoryOperator:
         chinese = re.findall(r'[\u4e00-\u9fff]', text)
         grams.update(chinese[i] + chinese[i + 1] for i in range(len(chinese) - 1))
         return grams
+    
+    def _is_substitution(self, text1: str, text2: str) -> bool:
+        """
+        两句话之间是否有"换词"
+
+        重复的说法只是增删词（"我对花生过敏" / "记住我花生过敏"），
+        不同的事实会把某个词换成另一个（"张三喜欢打篮球" / "李四喜欢打篮球"）。
+        """
+        a, b = self._normalize(text1), self._normalize(text2)
+        opcodes = SequenceMatcher(None, a, b, autojunk=False).get_opcodes()
+        return any(tag == 'replace' for tag, *_ in opcodes)
     
     def _override_tier(self, content: str) -> int:
         """新记忆中的修正信号层级：1 强 / 2 弱 / 0 无"""

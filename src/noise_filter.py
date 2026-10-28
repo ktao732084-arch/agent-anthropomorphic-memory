@@ -9,6 +9,24 @@ from typing import Dict, List, Optional
 from datetime import datetime
 
 
+# 敏感信息：无论句子里有没有事实，都不入库
+SECRET_PATTERNS = [
+    r'(密码|口令|password|passwd|pin\s*码?)\s*(是|为|[:：=])\s*\S{3,}',
+    r'(api[\s_-]?key|token|secret|密钥|key)\s*(是|为|[:：=])\s*\S{8,}',
+    r'\b(sk|pk|rk)-[A-Za-z0-9_\-]{8,}',          # OpenAI / Stripe 等
+    r'\bghp_[A-Za-z0-9]{20,}',                   # GitHub token
+    r'\bAKIA[0-9A-Z]{16}\b',                     # AWS access key
+    r'\bxox[abprs]-[A-Za-z0-9-]{10,}',           # Slack token
+    r'(?<!\d)\d{17}[\dXx](?!\d)',               # 18 位身份证号
+    r'(?<!\d)\d{16,19}(?!\d)',                   # 银行卡号
+]
+
+
+def contains_secret(text: str) -> bool:
+    """是否包含密码、密钥、证件号、卡号等敏感信息"""
+    return any(re.search(p, text, re.IGNORECASE) for p in SECRET_PATTERNS)
+
+
 class NoiseFilter:
     """
     虚假记忆过滤器（增强版）
@@ -85,13 +103,14 @@ class NoiseFilter:
         '单位换算', '多少钱', '怎么走',
         '路线', '导航', '地图',
         
-        # 琐碎问答
-        '什么意思', '怎么读', '怎么写',
-        '拼音', '英文', '中文',
+        # 琐碎问答（不含"英文""中文"：会误伤"我英文名叫 Kevin"这类事实）
+        '什么意思', '怎么读', '怎么写', '拼音',
     ]
     
     # ============================================================
     # 规则 3: 对话类型噪声
+    # 以寒暄/应答开头，且句子里没有事实时才算噪声
+    # （"不对，我生日其实是5月13号"、"哦不对，是对虾过敏"是更正，不能过滤）
     # ============================================================
     
     CONVERSATION_NOISE = [
@@ -109,7 +128,18 @@ class NoiseFilter:
         # 情绪表达（单独）
         r'^(哈哈|呵呵|笑死)',
         r'^(😂|😄|😊|👍)',
+        r'^(没问题|收到|了解|明白|随便)',
     ]
+    
+    # 出现这些词说明句子里有关于用户的事实
+    FACT_MARKERS = [
+        '我是', '我叫', '我姓', '我在', '我有', '我对', '我的', '我不', '我没',
+        '我喜欢', '我讨厌', '我住', '我家', '我老家', '我今年', '我从', '我每', '我最',
+        '过敏', '生日', '其实是',
+    ]
+    
+    # 疑问句结尾（问号、吗/呢、以及"怎么样""多少"等疑问词收尾）
+    QUESTION_PATTERN = r'([?？]|(吗|呢|怎么样|如何|多少|几点|为什么|哪个|哪里)[。.!！]*)\s*$'
     
     # ============================================================
     # 规则 4: 干扰项模式（HaluMem 特有）
@@ -121,15 +151,15 @@ class NoiseFilter:
         r'证明.*定理',
         r'计算.*积分',
         
-        # 编程题
-        r'写.*代码',
-        r'实现.*函数',
-        r'debug',
+        # 编程题（只过滤请求，不过滤"我平时用 Python 写代码"这类事实）
+        r'(帮我|给我|请你?|能不能|可以)\s*写.*代码',
+        r'(帮我|给我|请你?|能不能|可以)\s*实现.*函数',
+        r'(帮我|给我|请你?)\s*debug',
         
         # 学术问题
         r'解释.*概念',
         r'什么是.*理论',
-        r'.*的定义',
+        r'的定义是什么',
     ]
     
     def __init__(self, llm_client=None, strict_mode: bool = False):
@@ -153,6 +183,7 @@ class NoiseFilter:
             'by_importance': 0,
             'by_entity': 0,
             'by_conversation': 0,
+            'by_secret': 0,
             'by_llm': 0
         }
     
@@ -174,6 +205,12 @@ class NoiseFilter:
         
         content = memory.get('content', '').strip()
         
+        # 0. 敏感信息一律不入库
+        if contains_secret(content):
+            self.stats['filtered'] += 1
+            self.stats['by_secret'] += 1
+            return True
+        
         # ============================================================
         # 第一层：规则过滤（明确的噪声）
         # ============================================================
@@ -190,11 +227,12 @@ class NoiseFilter:
             self.stats['by_keyword'] += 1
             return True
         
-        # 1.3 对话类型噪声
-        if self._match_patterns(content, self.CONVERSATION_NOISE):
-            self.stats['filtered'] += 1
-            self.stats['by_conversation'] += 1
-            return True
+        # 1.3 对话类型噪声：寒暄/应答开头且不含事实；或不含事实的提问
+        if self._match_patterns(content, self.CONVERSATION_NOISE) or re.search(self.QUESTION_PATTERN, content):
+            if not self._has_fact(content):
+                self.stats['filtered'] += 1
+                self.stats['by_conversation'] += 1
+                return True
         
         # 1.4 干扰项模式（HaluMem）
         if self._match_patterns(content, self.DISTRACTION_PATTERNS):
@@ -206,8 +244,8 @@ class NoiseFilter:
         # 第二层：特征过滤
         # ============================================================
         
-        # 2.1 长度过滤（太短的通常是噪声）
-        if len(content) < 5:
+        # 2.1 长度过滤（中文 3 个字就能是完整事实，如"我姓王"）
+        if len(content) < 3:
             self.stats['filtered'] += 1
             self.stats['by_length'] += 1
             return True
@@ -279,6 +317,13 @@ class NoiseFilter:
                 return True
         return False
     
+    def _has_fact(self, text: str) -> bool:
+        """句子里是否有关于用户的事实（有事实标记，或"我"之后还有足够长的内容）"""
+        if any(marker in text for marker in self.FACT_MARKERS):
+            return True
+        idx = text.find('我')
+        return idx >= 0 and len(re.sub(r'[^\w]', '', text[idx:])) >= 6
+    
     def _match_keywords(self, text: str, keywords: List[str]) -> bool:
         """关键词匹配"""
         text_lower = text.lower()
@@ -321,6 +366,7 @@ class NoiseFilter:
             'by_importance': 0,
             'by_entity': 0,
             'by_conversation': 0,
+            'by_secret': 0,
             'by_llm': 0
         }
 

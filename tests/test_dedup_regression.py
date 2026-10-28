@@ -34,7 +34,7 @@ def check(name, ok, detail=""):
     print(f"{'✅ PASS' if ok else '❌ FAIL'}: {name}")
     if detail:
         print(f"       {detail}")
-    return int(ok)
+    return int(bool(ok))
 
 
 def test_correction_without_entities():
@@ -84,6 +84,29 @@ def test_common_words_not_override():
     return check("常用字不触发降权", down == 0, f"降权 {down}")
 
 
+def test_substitution_not_merged():
+    """只换了一个词的两句话是不同事实（花生 / 花粉），不能合并"""
+    existing = [fact("f_old", "我对花生过敏")]
+    new = fact("f_new", "我对花粉过敏")
+    merged, dup, _ = deduplicate_facts([new], existing)
+    return check("换词不合并", merged == [new] and dup == 0, f"新增 {len(merged)}, 去重 {dup}")
+
+
+def test_correction_with_different_entities():
+    """更正时实体本身变了（Java → Go），仍应识别为更正"""
+    old = fact("f_old", "我最喜欢的编程语言是 Java", entities=["Java"])
+    new = fact("f_new", "我现在最喜欢的编程语言变成 Go 了", entities=["Go"])
+    _, _, down = deduplicate_facts([new], [old])
+    return check("实体不同的更正", down == 1 and old.get("invalid_at"), f"降权 {down}, invalid_at={old.get('invalid_at')}")
+
+
+def test_merge_keeps_richer_wording():
+    """同一件事的两种说法，保留更完整的那一种"""
+    old = fact("f_old", "我喜欢跑步")
+    _, dup, _ = deduplicate_facts([fact("f_new", "我喜欢跑步，每周跑三次")], [old])
+    return check("合并保留更完整的说法", dup == 1 and "每周跑三次" in old["content"], f"合并后: {old['content']}")
+
+
 if __name__ == "__main__":
     tests = [
         test_correction_without_entities,
@@ -91,6 +114,9 @@ if __name__ == "__main__":
         test_duplicate_within_batch,
         test_unrelated_not_merged,
         test_common_words_not_override,
+        test_substitution_not_merged,
+        test_correction_with_different_entities,
+        test_merge_keeps_richer_wording,
     ]
     passed = sum(t() for t in tests)
     print("\n" + "=" * 60)

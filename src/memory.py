@@ -99,7 +99,7 @@ except ImportError:
 
 # 导入 v1.3.0 幻觉防御模块
 try:
-    from noise_filter import NoiseFilter
+    from noise_filter import NoiseFilter, contains_secret
     from memory_operator import MemoryOperator
     from conflict_resolver import ConflictResolver
 
@@ -108,6 +108,9 @@ try:
 except ImportError:
     HALLUCINATION_DEFENSE_ENABLED = False
     _noise_filter_instance = None
+
+    def contains_secret(text):
+        return False
 
 # 导入 v1.4.0 时序引擎模块
 try:
@@ -343,6 +346,9 @@ def is_noise(content: str) -> tuple[bool, str]:
     """
     content = content.strip()
 
+    if contains_secret(content):
+        return True, "secret"
+
     # v1.3.0: 优先用 NoiseFilter(更强的 4 层过滤)
     if HALLUCINATION_DEFENSE_ENABLED and _noise_filter_instance:
         try:
@@ -514,7 +520,7 @@ OVERRIDE_SIGNALS_TIER1 = [
 ]
 
 # Tier 2: 中置信度修正信号 → 标记为"可能冲突",降权但不自动覆盖
-OVERRIDE_SIGNALS_TIER2 = ["逗你的", "开玩笑", "骗你的", "瞎说的", "胡说", "说错了", "说反了", "搞错了", "弄错了"]
+OVERRIDE_SIGNALS_TIER2 = ["逗你的", "开玩笑", "骗你的", "瞎说的", "胡说", "说错了", "说反了", "搞错了", "弄错了", "不对"]
 
 # 合并(向后兼容)
 OVERRIDE_SIGNALS = OVERRIDE_SIGNALS_TIER1 + OVERRIDE_SIGNALS_TIER2
@@ -668,6 +674,9 @@ def archive_stale_memories(memory_dir):
 # 这些类别的记忆不会因为提到了某个日期就过期
 PERMANENT_CATEGORIES = {"identity_health_safety", "preference_relation_status"}
 
+# 有明确未来日期的安排,Phase 2 筛选时的最低重要性(高于默认阈值 0.3)
+DATED_PLAN_MIN_IMPORTANCE = 0.5
+
 
 def ground_record_time(record, category, observed_at=None):
     """把相对时间换算成绝对日期(原地修改 record)
@@ -755,6 +764,7 @@ def rule_filter(segments, threshold=0.3, use_llm_fallback=True):
     for segment in segments:
         content = segment.get("content", "") if isinstance(segment, dict) else segment
         source = segment.get("source", "unknown") if isinstance(segment, dict) else "unknown"
+        created = segment.get("created") if isinstance(segment, dict) else None
 
         # v1.2.0: 前置废话过滤(跳过明显废话,不进入 LLM)
         is_noise_content, noise_category = is_noise(content)
@@ -764,6 +774,11 @@ def rule_filter(segments, threshold=0.3, use_llm_fallback=True):
 
         # 1. 规则判断
         rule_importance, rule_category = calculate_importance(content)
+        # 有明确日期的安排("明天去医院复查")短期内有用,不因"临时"被筛掉;过期后会自动归档
+        observed = (_parse_utc(created) or _utcnow()).date()
+        _, event_date = ground_relative_dates(content, observed)
+        if event_date and event_date >= observed:
+            rule_importance = max(rule_importance, DATED_PLAN_MIN_IMPORTANCE)
 
         # 2. v1.1.7: 智能 LLM 集成
         if V1_1_7_ENABLED and llm_enabled and phase2_llm:
@@ -792,6 +807,7 @@ def rule_filter(segments, threshold=0.3, use_llm_fallback=True):
                     "importance": importance,
                     "category": category,
                     "source": source,
+                    "created": created,
                     "method": method,
                     "complexity": smart_result.get("complexity", {}),
                 }
@@ -804,6 +820,7 @@ def rule_filter(segments, threshold=0.3, use_llm_fallback=True):
                     "importance": rule_importance,
                     "category": rule_category,
                     "source": source,
+                    "created": created,
                     "method": "rule",
                 }
                 filtered.append(result)
@@ -819,6 +836,7 @@ def rule_filter(segments, threshold=0.3, use_llm_fallback=True):
                                 "importance": importance,
                                 "category": llm_result.get("category", rule_category),
                                 "source": source,
+                                "created": created,
                                 "method": "llm",
                             }
                             filtered.append(result)
@@ -1219,8 +1237,6 @@ def _deduplicate_with_operator(new_facts, existing_facts, events=None):
         conflict_threshold=DEDUP_CONFIG["min_overlap_ratio"],
         override_signals=(OVERRIDE_SIGNALS_TIER1, OVERRIDE_SIGNALS_TIER2),
     )
-    resolver = ConflictResolver()
-
     merged = []
     duplicate_count = 0
     downgraded_count = 0
@@ -1237,8 +1253,8 @@ def _deduplicate_with_operator(new_facts, existing_facts, events=None):
             events.append({"op": "ADD", "id": new_fact["id"], "content": new_fact["content"]})
 
         elif operation == "UPDATE" and target:
-            resolution = resolver.resolve(new_fact, target)
-            if resolution["action"] == "UPDATE":
+            # 同一件事的两种说法:保留更完整的那一种("我喜欢跑步" → "我喜欢跑步,每周跑三次")
+            if len(MemoryOperator._normalize(new_fact["content"])) > len(MemoryOperator._normalize(target["content"])):
                 events.append(
                     {
                         "op": "MERGE",
@@ -1250,11 +1266,10 @@ def _deduplicate_with_operator(new_facts, existing_facts, events=None):
                 )
                 # 用新记忆内容更新旧记忆
                 target["content"] = new_fact["content"]
-                target["importance"] = new_fact.get("importance", target["importance"])
+                target["importance"] = max(target.get("importance", 0), new_fact.get("importance", 0))
                 target["score"] = max(target.get("score", 0), new_fact.get("score", 0))
                 target["updated"] = now_iso()
                 target["merged_from"] = new_fact["id"]
-            # 否则 KEEP 旧记忆,丢弃新记忆
             duplicate_count += 1
 
         elif operation == "DELETE" and target:
@@ -1701,9 +1716,9 @@ def keyword_search(query, memory_dir, limit=20):
     with open(keywords_path, encoding="utf-8") as f:
         keywords_index = json.load(f)
 
-    # 提取查询关键词(改进版)
+    # 提取查询关键词(改进版);索引中英文已转小写,查询也转小写
     query_words = set()
-    segments = re.split(r'[,.!?/;:""' r"()\[\][]\s]+", query)
+    segments = re.split(r'[,.!?/;:""' r"()\[\][]\s]+", query.lower())
     for seg in segments:
         seg = seg.strip()
         if len(seg) >= 2:
@@ -2345,6 +2360,10 @@ def router_search(query, memory_dir=None, use_qmd=True, use_vector=True):
                 seen_ids.add(r["id"])
                 merged_results.append(r)
 
+    # 已被更正降权的旧说法不再出现在检索结果里(仍可用 get 按 ID 取回)
+    corrected = _corrected_ids(memory_dir)
+    merged_results = [r for r in merged_results if r.get("id") not in corrected]
+
     reranked = rerank_results(merged_results, query, config["rerank"], memory_dir=memory_dir)
 
     # v1.5.0: Spreading Activation（ACT-R）
@@ -2360,7 +2379,7 @@ def router_search(query, memory_dir=None, use_qmd=True, use_vector=True):
         traceback.print_exc()
         spread_bonus = []
 
-    final_results = reranked[: config["final"]] + spread_bonus
+    final_results = reranked[: config["final"]] + [r for r in spread_bonus if r.get("id") not in corrected]
 
     injection = format_injection(final_results)
 
@@ -2453,6 +2472,16 @@ def _vector_search(query: str, memory_dir: Path, limit: int = 20) -> list:
     except Exception as e:
         print(f"⚠️ 向量检索失败: {e}")
         return []
+
+
+def _corrected_ids(memory_dir):
+    """活跃池中被更正降权(conflict_downgraded)的记忆 ID"""
+    return {
+        r["id"]
+        for mem_type in ["facts", "beliefs", "summaries"]
+        for r in load_jsonl(memory_dir / f"layer2/active/{mem_type}.jsonl")
+        if r.get("conflict_downgraded")
+    }
 
 
 def _get_active_memory_count(memory_dir):
@@ -2779,6 +2808,15 @@ def cmd_capture(args):
         print("❌ 错误: 内容不能为空")
         return
 
+    # 与 consolidate Phase 2 使用同一套噪声/敏感信息过滤
+    noise, noise_category = is_noise(content)
+    if noise:
+        if noise_category == "secret":
+            print("⚠️ 检测到密码、密钥、证件号等敏感信息,未保存")
+        else:
+            print("ℹ️ 判定为寒暄、提问或一次性请求,未保存")
+        return
+
     # 未指定 importance 时按规则计算(与 consolidate Phase 2 一致)
     auto_importance, category = calculate_importance(content)
     if importance is None:
@@ -2901,6 +2939,10 @@ def rebuild_index(memory_dir):
         #    永远匹配不到索引键"用户是医学生"。
         #    现在对每段连续中文同时索引整段(支持全短语查询)和
         #    2-gram,与 keyword_search 查询端的 2-4 字子串切分保证有交集。
+        # 中文紧跟字母/数字的词(如"项目B"),让单个字母也能被检索
+        for mixed in re.findall(r"[\u4e00-\u9fa5]{2}[a-z0-9]+", text.lower()):
+            keywords.add(mixed)
+
         chinese_runs = re.findall(r"[\u4e00-\u9fa5]{2,}", text)
         for run in chinese_runs:
             keywords.add(run)
@@ -2992,7 +3034,7 @@ def cmd_consolidate(args):
                     raw_text = f.read()
                 for line in raw_text.split("\n"):
                     line = line.strip()
-                    if line and len(line) > 5:
+                    if line:
                         segments.append({"content": line, "source": args.input})
                 print(f"   从文件读取 {len(segments)} 个片段")
             else:
@@ -3001,7 +3043,7 @@ def cmd_consolidate(args):
                 if pending:
                     for item in pending:
                         content = item.get("content", "").strip()
-                        if content and len(content) > 5:
+                        if content:
                             segments.append({
                                 "content": content,
                                 "source": item.get("source", "user"),
