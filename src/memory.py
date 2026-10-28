@@ -32,6 +32,7 @@ from embeddings import VectorStore, cosine, get_embedder
 from llm_judge import get_judge
 from embeddings import load_settings as load_embedding_settings
 from temporal import ground_relative_dates
+from lexical_search import rank as bm25_rank
 
 # 导入 v1.1 新增模块
 try:
@@ -244,7 +245,7 @@ def call_llm(prompt, system_prompt=None, max_tokens=1000):
 DEFAULT_CONFIG = {
     "version": "1.4.0",
     "decay_rates": {"fact": 0.008, "belief": 0.07, "summary": 0.025},
-    "thresholds": {"archive": 0.05, "summary_trigger": 3},
+    "thresholds": {"archive": 0, "summary_trigger": 3},
     "token_budget": {"layer1_total": 2000},
     "consolidation": {"fallback_hours": 48},
     "conflict_detection": {"enabled": True, "penalty": 0.2},
@@ -782,7 +783,7 @@ def rule_filter(segments, threshold=0.3, use_llm_fallback=True):
 
         # 1. 规则判断
         rule_importance, rule_category = calculate_importance(content)
-        # 有明确日期的安排("明天去医院复查")短期内有用,不因"临时"被筛掉;过期后会自动归档
+        # 有明确日期的安排("明天去医院复查")短期内有用,不因"临时"被筛掉;过期后只标记已过去
         observed = (_parse_utc(created) or _utcnow()).date()
         _, event_date = ground_relative_dates(content, observed)
         if event_date and event_date >= observed:
@@ -1083,17 +1084,22 @@ def template_extract(filtered_segments, use_llm_fallback=True, memory_dir=None):
         # 1. v1.1.5: 三层实体识别(传入 memory_dir)
         entities = extract_entities(content, memory_dir=memory_dir, use_llm_fallback=llm_enabled and phase3_llm)
         mem_type = classify_memory_type(content, importance)
+        if source == "assistant":
+            # 事实仅指“AI 曾说过这些话”，不代表用户确认或内容已被验证。
+            mem_type = "fact"
+            content = "AI 回复：" + content
         _, content_category = calculate_importance(content)
 
         # 2. 构建记录
         record = {
-            "id": generate_id(mem_type[0], content),
+            "id": generate_id(mem_type[0], "assistant\0" + content if source == "assistant" else content),
             "content": content,
             "importance": importance,
             "score": importance,
             "entities": entities,
             "created": now_iso(),
             "source": source,
+            "role": "assistant" if source == "assistant" else "user",
             "extract_method": method,
             # v1.1.4 新增字段
             "expires_at": None,
@@ -1108,7 +1114,7 @@ def template_extract(filtered_segments, use_llm_fallback=True, memory_dir=None):
             "reactivation_count": 0,
             "final_score": importance,
             # v1.5.0: identity 保护标签（BMAM Identity Preservation）
-            "is_identity": content_category == "identity_health_safety",
+            "is_identity": source != "assistant" and content_category == "identity_health_safety",
         }
 
         # v1.1.4: 时间敏感检测
@@ -1273,12 +1279,14 @@ def _deduplicate_with_operator(new_facts, existing_facts, events=None):
     downgraded_count = 0
 
     for new_fact in new_facts:
-        operation, target = operator.decide_operation(new_fact, existing_facts + merged)
+        same_role = [r for r in existing_facts + merged
+                     if (r.get("source") == "assistant") == (new_fact.get("source") == "assistant")]
+        operation, target = operator.decide_operation(new_fact, same_role)
         targets = [target] if target else []
         llm = None
 
         if operation == "ADD" and judge:
-            candidates = _judge_candidates(new_fact, existing_facts + merged, store, operator, judge.settings)
+            candidates = _judge_candidates(new_fact, same_role, store, operator, judge.settings)
             verdict = judge.judge(new_fact, candidates)
             if verdict and verdict["decision"] != "ADD":
                 llm = {"decided_by": "llm", "reason": verdict["reason"]}
@@ -1397,6 +1405,8 @@ def _deduplicate_legacy(new_facts, existing_facts):
         for entity in new_entities:
             if entity in existing_by_entity:
                 for existing in existing_by_entity[entity]:
+                    if (existing.get("source") == "assistant") != (new_fact.get("source") == "assistant"):
+                        continue
                     existing_content = existing["content"].lower()
                     new_tokens = tokenize_chinese(new_content)
                     existing_tokens = tokenize_chinese(existing_content)
@@ -1457,6 +1467,8 @@ def code_verify_belief(belief, facts):
     belief_entities = belief.get("entities", [])
 
     for fact in facts:
+        if fact.get("source") == "assistant":
+            continue
         fact_content = fact["content"].lower()
         fact_entities = fact.get("entities", [])
 
@@ -1516,6 +1528,8 @@ def generate_summaries(facts, existing_summaries, trigger_count=3):
     # 按实体分组 facts
     facts_by_entity = {}
     for fact in facts:
+        if fact.get("source") == "assistant":
+            continue
         for entity in fact.get("entities", []):
             if entity not in facts_by_entity:
                 facts_by_entity[entity] = []
@@ -1606,6 +1620,8 @@ def update_entities(facts, beliefs, summaries, memory_dir):
     entity_summaries = {}
 
     for fact in facts:
+        if fact.get("source") == "assistant":
+            continue
         for entity in fact.get("entities", []):
             all_entities.add(entity)
             if entity not in entity_facts:
@@ -1775,74 +1791,27 @@ def classify_query_type(query, trigger_layer):
     return "topic"
 
 
-def keyword_search(query, memory_dir, limit=20):
-    """
-    基于关键词的检索
-    返回: [(memory_id, score, content), ...]
-    """
-    import re
-
-    # 加载关键词索引
-    keywords_path = memory_dir / "layer2/index/keywords.json"
-    if not keywords_path.exists():
-        return []
-
-    with open(keywords_path, encoding="utf-8") as f:
-        keywords_index = json.load(f)
-
-    # 提取查询关键词(改进版);索引中英文已转小写,查询也转小写
-    query_words = set()
-    segments = re.split(r'[,.!?/;:""' r"()\[\][]\s]+", query.lower())
-    for seg in segments:
-        seg = seg.strip()
-        if len(seg) >= 2:
-            query_words.add(seg)
-        # 提取2-4字子串
-        for i in range(len(seg)):
-            for length in [2, 3, 4]:
-                if i + length <= len(seg):
-                    sub = seg[i : i + length]
-                    if len(sub) >= 2:
-                        query_words.add(sub)
-
-    # 计算每个记忆的匹配分数
-    memory_scores = {}
-    for word in query_words:
-        if word in keywords_index:
-            for mem_id in keywords_index[word]:
-                if mem_id not in memory_scores:
-                    memory_scores[mem_id] = 0
-                memory_scores[mem_id] += 1
-
-    # 加载记忆内容
-    results = []
-    all_memories = {}
-    for mem_type in ["facts", "beliefs", "summaries"]:
-        records = load_jsonl(memory_dir / f"layer2/active/{mem_type}.jsonl")
-        for r in records:
-            all_memories[r["id"]] = r
-
-    # 排序并返回
-    sorted_ids = sorted(memory_scores.keys(), key=lambda x: memory_scores[x], reverse=True)
-    for mem_id in sorted_ids[:limit]:
-        if mem_id in all_memories:
-            mem = all_memories[mem_id]
-            results.append(
-                {
-                    "id": mem_id,
-                    "score": memory_scores[mem_id],
-                    "content": mem.get("content", ""),
-                    "importance": mem.get("importance", 0.5),
-                    "memory_score": mem.get("score", 0.5),
-                    "type": "fact" if mem_id.startswith("f_") else ("belief" if mem_id.startswith("b_") else "summary"),
-                    "entities": mem.get("entities", []),
-                    "last_accessed": mem.get("last_accessed"),
-                    "is_identity": mem.get("is_identity", False),
-                    "confidence": mem.get("confidence"),
-                }
-            )
-
+def lexical_results(query, memory_dir):
+    """Score active and pending records together; archived/corrected rows stay excluded."""
+    records = list(_load_all_active_records(memory_dir).values())
+    records += [{**r, "type": "pending", "match_source": "pending"} for r in load_pending(memory_dir)]
+    corrected = _corrected_ids(memory_dir)
+    records = [r for r in records if r["id"] not in corrected and not r.get("invalid_at")]
+    results = bm25_rank(query, records)
+    for r in results:
+        r["memory_score"] = r.get("score", r.get("importance", 0.5))
+        r["score"] = r["bm25_score"]
+        r.setdefault("match_source", "bm25")
+        r.setdefault("importance", 0.5)
+        r.setdefault("entities", [])
+        if r["type"] == "pending" and r.get("source") == "assistant":
+            r["content"] = "AI 回复：" + r["content"]
     return results
+
+
+def keyword_search(query, memory_dir, limit=20):
+    """BM25 with IDF, term-frequency saturation and document-length normalization."""
+    return [r for r in lexical_results(query, memory_dir) if r["type"] != "pending"][:limit]
 
 
 def entity_search(query, memory_dir, limit=20):
@@ -1931,7 +1900,12 @@ def rerank_results(results, query, limit, memory_dir=None):
         importance = r.get("importance", 0.5)
         relevance = r.get("score", 0) * 0.5 + r.get("memory_score", 0.5) * 0.5
 
-        r["final_score"] = 0.35 * recency + 0.35 * importance + 0.30 * relevance
+        if "lexical_relevance" in r:
+            # Relevant old facts must remain recoverable even when decay approaches zero.
+            r["final_score"] = (0.80 * r["lexical_relevance"] + 0.10 * importance
+                                + 0.05 * recency + 0.05 * r.get("memory_score", 0.5))
+        else:
+            r["final_score"] = 0.35 * recency + 0.35 * importance + 0.30 * relevance
 
     # 2. v1.1.5: 实体隔离(竞争性抑制)
     if V1_1_5_ENABLED and results:
@@ -2062,7 +2036,10 @@ def format_injection(results, confidence_threshold_high=0.8, confidence_threshol
     for r in results:
         confidence = r.get("memory_score", 0.5)
 
-        if confidence >= confidence_threshold_high:
+        if r.get("source") == "assistant":
+            output["marked"].append({"content": r["content"], "type": r["type"],
+                                     "source": r["id"], "role": "assistant"})
+        elif confidence >= confidence_threshold_high:
             output["direct"].append({"content": r["content"], "type": r["type"]})
         elif confidence >= confidence_threshold_low:
             output["marked"].append({"content": r["content"], "type": r["type"], "source": r["id"]})
@@ -2375,7 +2352,8 @@ def router_search(query, memory_dir=None, use_qmd=True, use_vector=True):
     query_type = classify_query_type(query, trigger_layer)
     config = QUERY_CONFIG[query_type]
 
-    pending_results = search_pending(query, memory_dir)
+    lexical_hits = lexical_results(query, memory_dir)
+    pending_results = [r for r in lexical_hits if r["type"] == "pending"]
 
     vector_results = []
     vector_used = False
@@ -2417,7 +2395,7 @@ def router_search(query, memory_dir=None, use_qmd=True, use_vector=True):
                     record["match_source"] = "qmd"
                     qmd_results.append(record)
 
-    keyword_results = keyword_search(query, memory_dir, limit=config["initial"])
+    keyword_results = [r for r in lexical_hits if r["type"] != "pending"][:config["initial"]]
     entity_results = entity_search(query, memory_dir, limit=config["initial"])
 
     # v1.5.2: RRF 合并多路结果（pending 直接保留，其余走 RRF）
@@ -2450,6 +2428,15 @@ def router_search(query, memory_dir=None, use_qmd=True, use_vector=True):
     # 已被更正降权的旧说法不再出现在检索结果里(仍可用 get 按 ID 取回)
     corrected = _corrected_ids(memory_dir)
     merged_results = [r for r in merged_results if r.get("id") not in corrected]
+
+    # Restore BM25 evidence and provenance if another retrieval route won deduplication.
+    lexical = {r["id"]: r for r in lexical_hits}
+    active = _load_all_active_records(memory_dir)
+    for r in merged_results:
+        original = lexical.get(r["id"], active.get(r["id"], {}))
+        for key in ("source", "role", "created", "bm25_score", "lexical_relevance", "memory_score"):
+            if key in original:
+                r[key] = original[key]
 
     # 字面命中优先,语义结果只补在后面:避免"重要性高但不相关"的语义近邻排到精确命中前面
     literal = [r for r in merged_results if r.get("match_source") != "semantic"]
@@ -2646,7 +2633,7 @@ def _load_all_active_records(memory_dir):
     for mem_type in ["facts", "beliefs", "summaries"]:
         path = memory_dir / f"layer2/active/{mem_type}.jsonl"
         for r in load_jsonl(path):
-            r["type"] = mem_type.rstrip("s")
+            r["type"] = {"facts": "fact", "beliefs": "belief", "summaries": "summary"}[mem_type]
             records[r["id"]] = r
     return records
 
@@ -2674,6 +2661,8 @@ def cmd_search(args):
                             "type": r["type"],
                             "content": r["content"][:120],
                             "score": round(r.get("final_score", 0), 3),
+                            "source": r.get("source", "unknown"),
+                            "role": r.get("role", "assistant" if r.get("source") == "assistant" else "user"),
                             "importance": r.get("importance"),
                             "confidence": r.get("confidence"),
                         }
@@ -3323,7 +3312,6 @@ def cmd_consolidate(args):
         if not args.phase or args.phase == 5:
             print("\n⚖️ Phase 5: 权重更新")
             decay_rates = config["decay_rates"]
-            archive_threshold = config["thresholds"]["archive"]
 
             # 5a: 应用访问加成(v1.1.5 已在 v1_1_helpers.calculate_access_boost 中修复)
             if V1_1_ENABLED:
@@ -3359,7 +3347,6 @@ def cmd_consolidate(args):
             print("   5c: 衰减更新")
             import math as _math
 
-            archived_count = 0
             _now_dt = _utcnow()
 
             def _parse_ts(ts):
@@ -3372,7 +3359,6 @@ def cmd_consolidate(args):
 
             for mem_type in ["facts", "beliefs", "summaries"]:
                 active_path = memory_dir / f"layer2/active/{mem_type}.jsonl"
-                archive_path = memory_dir / f"layer2/archive/{mem_type}.jsonl"
 
                 records = load_jsonl(active_path)
 
@@ -3395,22 +3381,10 @@ def cmd_consolidate(args):
                     r["score"] = r.get("score", importance) * _math.exp(-effective_rate * days)
                     r["last_decayed"] = now_iso()
 
-                remaining = []
-                to_archive = []
+                # Ignore legacy thresholds.archive: decay is ranking, not deletion.
+                save_jsonl(active_path, records)
 
-                for r in records:
-                    if r.get("score", 0) < archive_threshold:
-                        to_archive.append(r)
-                        archived_count += 1
-                    else:
-                        remaining.append(r)
-
-                save_jsonl(active_path, remaining)
-                if to_archive:
-                    existing = load_jsonl(archive_path)
-                    save_jsonl(archive_path, existing + to_archive)
-
-            print(f"   衰减完成,归档 {archived_count} 条")
+            print("   衰减完成，记忆仍保留在检索池")
             print("   ✅ 完成")
 
         # Phase 6: 索引更新
@@ -3978,41 +3952,12 @@ def add_to_pending(memory_dir, content: str, source: str = "user") -> dict:
 def search_pending(query: str, memory_dir=None) -> list:
     """
     搜索 pending buffer(Hot Store)
-    简单关键词匹配,用于 router_search 的第一优先级
+    与活跃池使用同一套 BM25 统计和分数
     """
     if memory_dir is None:
         memory_dir = get_memory_dir()
 
-    pending = load_pending(memory_dir)
-    if not pending:
-        return []
-
-    results = []
-    query_lower = query.lower()
-    query_words = set(re.findall(r"[\u4e00-\u9fa5]+|[a-zA-Z]+", query_lower))
-
-    for record in pending:
-        content_lower = record.get("content", "").lower()
-        # 简单匹配:查询词出现在内容中
-        score = 0
-        for word in query_words:
-            if word in content_lower:
-                score += 1
-
-        if score > 0:
-            record_copy = record.copy()
-            # 补充 router_search 需要的字段
-            record_copy["type"] = "pending"
-            record_copy["score"] = record.get("importance", 0.5)
-            record_copy["final_score"] = record.get("importance", 0.5)
-            record_copy["match_score"] = score / len(query_words) if query_words else 0
-            record_copy["match_source"] = "pending"
-            record_copy["entities"] = []
-            results.append(record_copy)
-
-    # 按匹配分数排序
-    results.sort(key=lambda x: x["match_score"], reverse=True)
-    return results
+    return [r for r in lexical_results(query, memory_dir) if r["type"] == "pending"]
 
 
 # ============================================================
@@ -4236,6 +4181,8 @@ def cmd_mini_consolidate(args):
     extracted = []
     for record in kept:
         content = record["content"]
+        if record.get("source") == "assistant":
+            content = "AI 回复：" + content
         importance = record.get("importance", 0.5)
 
         # 提取实体
@@ -4252,7 +4199,8 @@ def cmd_mini_consolidate(args):
             "created": record.get("created", now_iso()),
             "updated": now_iso(),
             "entities": entities,
-            "source": "mini-consolidate",
+            "source": record.get("source", "user"),
+            "role": "assistant" if record.get("source") == "assistant" else "user",
         }
         extracted.append(new_record)
         print(f"   ✅ 提取: {content[:40]}...")

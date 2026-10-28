@@ -2,7 +2,7 @@
 """
 Agent 化相关功能的端到端测试（通过 CLI 调用，使用临时记忆目录）
 
-- 相对时间落地 + 未来事件过期后归档
+- 相对时间落地 + 未来事件过去后仍可检索
 - 强修正 → 旧记忆写入 invalid_at 并移入归档池（不删除）
 - 操作历史 history.jsonl
 - search --json 只输出可解析的 JSON；get 按 ID 取全文（含归档池）
@@ -97,7 +97,7 @@ def main():
             f"pools={[m['pool'] for m in got['memories']]} missing={got['missing']}",
         )
 
-        # 6. 过期事件在下一次 consolidate 时归档
+        # 6. 过期事件在下一次 consolidate 时标记，仍保留
         rows = load(mem / "layer2/active/facts.jsonl")
         for r in rows:
             if r.get("expires_at"):

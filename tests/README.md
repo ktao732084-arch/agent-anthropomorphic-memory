@@ -13,9 +13,24 @@ python3 tests/test_agent_features.py
 python3 tests/test_embeddings.py   # 语义向量（用本地假服务测 OpenAI 兼容接口）
 python3 tests/test_llm_judge.py    # LLM 写入判断（用本地假服务测链路）
 python3 tests/test_collector.py    # 会话收集器（剥元数据外壳、修复非法转义）
+python3 tests/test_longterm_recall.py  # AI 来源隔离、BM25 排名、低分保留
 python3 tests/test_consolidate_types.py  # summary 类型不导致 consolidate 崩溃
 python3 src/temporal.py        # 相对时间换算自测
 ```
+
+## 长期记忆改进回归（2026-10-29）
+
+`test_longterm_recall.py` 使用合成数据、临时记忆目录和真实 CLI，覆盖默认采集双方文本、
+排除思考/工具块、角色去重 ID、重复采集、AI 来源保留且不覆盖用户、低分保留及手动归档、
+短记忆与长任务说明竞争、稀有词、英文整词和标识符、词频饱和、pending 与旧记忆统一评分。
+不使用私人题目或原始对话，不调用外部 LLM。
+
+验证结果：新增 9/9 回归测试通过；下表所列原有 11 个测试脚本及 `src/temporal.py`
+自测通过。新增测试还覆盖用户引用 AI 原话时 ID 不冲突，以及 AI 回复不能证实用户推断或生成用户画像摘要。
+
+84 个合成用例的 pending 模式重新评测为 **145/166**，与 `04b164e` 基线逐项对照，
+没有新增失败，也没有新增通过；原有 21 项失败仍保留。详见
+[验证记录](../eval/results/2026-10-29-bm25-synthetic.json)。这不代表真实长对话的准确率。
 
 ## 当前状态（2026-10）
 
@@ -31,7 +46,7 @@ python3 src/temporal.py        # 相对时间换算自测
 | test_consolidate_types.py | consolidate 遇到 summary 类型不崩溃（回归） | ✅ 1/1 |
 | test_llm_judge.py | src/llm_judge.py（输出解析、取代/重复链路、无候选不调用、出错按规则、提示词不含评测原句） | ✅ 9/9 |
 | test_embeddings.py | src/embeddings.py（向量缓存、换模型失效、服务不可用降级、语义只用于更正不用于合并） | ✅ 8/8 |
-| test_agent_features.py | CLI 端到端（时间落地、更正失效归档、history、search --json、get、过期归档） | ✅ 6/6 |
+| test_agent_features.py | CLI 端到端（时间落地、更正失效归档、history、search --json、get、事件过后仍保留） | ✅ 6/6 |
 
 ## 已修复的回归（2026-10）
 

@@ -32,7 +32,7 @@ dreaming 后台整理（light → REM → deep 三阶段，按阈值晋升到 `M
 |------|--------|------|
 | 更正 → 失效而非删除 | Graphiti `resolve_edge_contradictions` | 强更正（Tier 1）给旧记忆写 `invalid_at`、`superseded_by` 并移入归档池；弱更正（Tier 2）只降权 |
 | 操作历史 | mem0 history 表 | `layer2/history.jsonl` 记录 ADD / NOOP / MERGE / INVALIDATE / DOWNGRADE / ARCHIVE，MERGE 带 `old_content`，可回滚 |
-| 相对时间落地 | mem0 抽取提示词"按 Observation Date 换算" | `src/temporal.py`：今天/明天/下周三/下个月15号等换算成绝对日期并标注在原文；未来事件在事件次日过期归档 |
+| 相对时间落地 | mem0 抽取提示词"按 Observation Date 换算" | `src/temporal.py`：今天/明天/下周三/下个月15号等换算成绝对日期并标注在原文；未来事件在事件次日标记已过去，仍可检索 |
 | 渐进披露检索 | claude-mem 三层检索 | `search --json` 只返回 id + 摘要 + 分数；`get <id>` 取全文（含归档池） |
 | SKILL.md 规范化 | OpenClaw skill 规范 | `metadata.openclaw` 替代旧的 `clawdbot`；一行描述（<160 字）；用 `{baseDir}` 路径；写清楚"何时写 / 何时查 / 怎么用结果"；长文档移到 `references/` |
 | 修复失效的集成说明 | OpenClaw 文档 | 旧 SKILL.md 让用户配 `systemPromptFiles`，OpenClaw 没有这个配置项，Layer 1 快照实际从未被自动注入 |
@@ -44,12 +44,12 @@ dreaming 后台整理（light → REM → deep 三阶段，按阈值晋升到 `M
 用 MemoryBank、PerLTQA、LoCoMo 和作者本人的真实对话做了端到端评测（`eval/longterm/`）：
 公开集 33%、私有集 50%，而"完美记忆"（全文给 LLM）是 79% / 90%。归因后的优先级：
 
-1. **AI 说过的话也要记**（评测开关验证：中文公开集 +18 个百分点）
-2. **衰减不能等于硬遗忘**：衰减只影响排序，归档池也要能检索（验证：PerLTQA +16 个百分点）
-3. **检索改用 BM25 并做长度归一化**：长消息霸占检索结果，是私有集的主要失败原因
+1. ✅ **AI 说过的话也要记**（2026-10-29 已实现默认采集、角色隔离）（评测开关验证：中文公开集 +18 个百分点）
+2. ✅ **衰减不能等于硬遗忘**：低分记忆留在活跃池，衰减只影响排序；手动/失效归档仍隔离（验证：PerLTQA +16 个百分点）
+3. ✅ **检索改用 BM25 并做长度归一化**（2026-10-29 已实现，含 pending）：长消息霸占检索结果，是私有集的主要失败原因
 4. **写入时提炼事实**（mem0 式抽取），不要原样存整条长消息
 
-详见 `eval/longterm/README.md`。
+详见 `eval/longterm/README.md`。上述百分点属于历史开关实验，本轮未重跑长期 LLM 评测，不能据此声明 BM25 的提升。
 
 ## 下一步（按优先级）
 
@@ -77,7 +77,7 @@ dreaming 后台整理（light → REM → deep 三阶段，按阈值晋升到 `M
 4b. ✅ **LLM 判断**：`src/llm_judge.py`，规则判为新增且有相关旧记忆时，让 LLM 判断"重复 / 取代 / 新增"。
    语义检索 + DeepSeek-V4.1-Flash 评测 164/166 (99%)，14 个"应新增"的对照判断无一误判。
    剩余 2 个失败是极短查询和跨语言检索，属于 embedding 模型能力问题。
-5. **来源门控**（参考 OpenClaw provenance）。只有用户本人的消息能产生 Fact；网页、工具输出、
+5. **来源门控**（参考 OpenClaw provenance）。用户 Fact 与 AI 回复记录已按来源隔离；AI 的 fact 仅指“曾说过”，不会覆盖用户事实。完整来源门控仍待做；网页、工具输出、
    子 Agent 的内容最多存成 Belief，或直接不存，防止记忆被投毒。
 6. **作用域**（参考 mem0 的 user / agent / run 过滤）。多 Agent 或多用户共用时必需。
 

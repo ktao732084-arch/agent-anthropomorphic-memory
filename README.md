@@ -1,12 +1,19 @@
 # Memory System — AI Agent 持久化记忆系统
 
-> 一个受神经科学启发的 AI Agent 记忆系统，支持三层存储、关键词+实体检索（可选 QMD/BM25 增强）、时间驱动的指数衰减和 7 阶段记忆整合。
+> 一个受神经科学启发的 AI Agent 记忆系统，支持三层存储、本地 BM25 + 实体检索（可选语义增强）、时间驱动的指数衰减和 7 阶段记忆整合。
 
 ![stars](https://img.shields.io/github/stars/ktao732084-arch/openclaw_memory_supersystem-v1.0)
 ![license](https://img.shields.io/github/license/ktao732084-arch/openclaw_memory_supersystem-v1.0)
 ![python](https://img.shields.io/badge/python-3-blue)
 
 自 2026-02-03 首次发布以来迭代至 v1.4.0；核心逻辑与测试见 `src/`、`tests/`，历史设计文档见 `docs/archive/`。
+
+## 长期记忆改进（2026-10-29，未发布）
+
+- 会话收集器默认记录用户和 AI 的文本回复，保留来源；AI 回复不能覆盖用户事实。
+- 时间衰减只影响排序，不再把低分记忆移入归档；已过去的事件仍可检索。
+- 默认检索改用本地 BM25，并统一活跃池与 pending 的评分，缓解长消息挤占短记忆。
+- 使用方法见 [SKILL.md](SKILL.md)，历史评测及新旧口径见 [长期评测说明](eval/longterm/README.md)。
 
 ## 📋 版本更新记录
 
@@ -31,10 +38,11 @@
 ```
 src/
 ├── memory.py                # 主入口 + CLI + 存储（JSONL 分层）+ 检索
-│                            #   （关键词倒排 + 实体索引 + 可选 QMD/BM25）
+│                            #   （BM25 + 实体索引 + 可选语义检索）
 │                            #   + 7 阶段 Consolidation + 指数衰减
 │
 ├── 智能层（被 memory.py 主流程使用）
+│   ├── lexical_search.py    # 零依赖 BM25，中文二元字组、英文单词及数字标识符
 │   ├── temporal.py          # 相对时间 → 绝对日期（"下周三" → 2026-11-04）
 │   ├── embeddings.py        # 可选语义检索（OpenAI 兼容接口 / 本地 ONNX），默认关闭
 │   ├── llm_judge.py         # 可选 LLM 写入判断（重复 / 取代 / 新增），默认关闭
