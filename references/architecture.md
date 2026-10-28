@@ -1,18 +1,4 @@
----
-name: memory-system
-version: 1.4.0
-description: 三层记忆架构系统，模拟人类记忆机制。自动提取、结构化存储、时间驱动指数衰减、动态快照。含 7 阶段 Consolidation、Fact/Belief 分类、噪声过滤与冲突消解（版本历史见 README）。
-metadata:
-  clawdbot:
-    emoji: "🧠"
-    requires:
-      bins: ["python3", "jq"]
-    install:
-      - id: "init"
-        kind: "script"
-        command: "python3 src/memory.py init"
-        label: "初始化记忆系统目录结构"
----
+> 本文是 Memory System 的架构与机制说明（原 SKILL.md 正文）。Agent 日常使用只需看 [SKILL.md](../SKILL.md)。
 
 # Memory System v1.4.0 — 三层记忆架构
 
@@ -530,63 +516,7 @@ python3 src/memory.py archive <memory_id>
 
 ## 与 OpenClaw 集成
 
-### 1. 配置 Layer 1 自动注入
-
-在 OpenClaw 配置中添加：
-
-```json
-{
-  "agents": {
-    "main": {
-      "systemPromptFiles": [
-        "memory/layer1/snapshot.md"
-      ]
-    }
-  }
-}
-```
-
-### 2. 配置定时 Consolidation
-
-添加 Cron Job：
-
-```json
-{
-  "name": "Memory Consolidation",
-  "schedule": {"kind": "cron", "expr": "0 3 * * *"},
-  "payload": {"kind": "systemEvent", "text": "执行记忆整合: python3 src/memory.py consolidate"},
-  "sessionTarget": "main"
-}
-```
-
-### 3. 配置 Heartbeat 兜底
-
-在 HEARTBEAT.md 中添加：
-
-```markdown
-## Memory Consolidation 检查
-如果距离上次 Consolidation > 48 小时：
-  执行 `python3 src/memory.py consolidate`
-```
-
-### 4. 配置检索规则
-
-在 AGENTS.md 中添加：
-
-```markdown
-## 记忆检索规则
-
-### 自动注入
-- Layer 1 snapshot 已通过 systemPromptFiles 自动注入
-
-### 主动检索触发条件
-当用户消息包含以下情况时，调用 memory_search：
-- 提到过去："之前"、"上次"、"以前"
-- 询问偏好："我喜欢"、"我讨厌"
-- 涉及人物：人名、关系词
-- 涉及项目：项目名、任务名
-- 显式请求："你还记得"、"帮我回忆"
-```
+见 [SKILL.md](../SKILL.md) 的"与 OpenClaw 自带记忆的关系"一节。
 
 ---
 
@@ -689,10 +619,10 @@ python3 src/memory.py archive <memory_id>
 
 ## 参考文档
 
-- [设计文档](docs/design.md) — 完整的架构设计说明
-- [Consolidation 报告](docs/consolidation.md) — 7 Phase 详细实现
-- [API 参考](docs/api.md) — CLI 命令和配置说明
-- [CHANGELOG](CHANGELOG.md) — 完整版本更新日志
+- [设计文档](../docs/design.md) — 完整的架构设计说明
+- [Consolidation 细节](../docs/consolidation_detail.md) — 7 Phase 详细实现
+- [对标成熟项目的优化路线](../docs/ROADMAP-agent-skill.md)
+- [CHANGELOG](../CHANGELOG.md)
 
 ---
 

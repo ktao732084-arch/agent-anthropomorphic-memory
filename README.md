@@ -35,6 +35,7 @@ src/
 │                            #   + 7 阶段 Consolidation + 指数衰减
 │
 ├── 智能层（被 memory.py 主流程使用）
+│   ├── temporal.py          # 相对时间 → 绝对日期（"下周三" → 2026-11-04）
 │   ├── noise_filter.py      # 虚假记忆/废话过滤
 │   ├── memory_operator.py   # ADD/UPDATE/DELETE/NOOP 决策器
 │   └── conflict_resolver.py # 冲突检测与消解
@@ -50,6 +51,10 @@ src/
 
 legacy/                      # v1.1.x 时代模块（实体系统、LLM 集成等），
                              # 置于 PYTHONPATH 时 memory.py 会自动启用增强功能
+
+SKILL.md                     # Agent 使用说明（何时写、何时查、怎么用结果）
+references/architecture.md   # 架构与机制详解
+docs/ROADMAP-agent-skill.md  # 对标 mem0 / Graphiti / claude-mem / OpenClaw 的优化路线
 ```
 
 > **如实说明**：v1.4.0+ 迭代中在作者本机开发的部分模块（temporal_engine、
@@ -330,7 +335,7 @@ Phase 1: 收集 ──→ Phase 2: 筛选 ──→ Phase 3: 提取
 
 ```
 openclaw_memory_supersystem/
-├── SKILL.md                 # 使用文档
+├── SKILL.md                 # Agent 使用说明（详细机制见 references/）
 ├── src/
 │   └── memory.py            # 核心CLI（4500+行Python）
 ├── prompts/                 # 早期外置 Prompt（现已内联进 memory.py，留档参考）
