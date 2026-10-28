@@ -6,7 +6,6 @@ Memory System v1.3.0 - Memory Operator
 
 import re
 import json
-from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 
@@ -15,10 +14,10 @@ class MemoryOperator:
     """
     记忆操作决策引擎
     
-    决策流程：
-    1. 规则快速过滤（0 Token）
-    2. 语义相似度检测（本地模型）
-    3. LLM 冲突决策（仅在必要时）
+    决策流程（全部为规则，0 Token）：
+    1. 噪声过滤 → NOOP
+    2. 找出字面最相似的旧记忆
+    3. 内容相同 → NOOP；带修正信号 → DELETE（降权旧记忆）；高度相似 → UPDATE；否则 ADD
     """
     
     # 操作类型
@@ -44,18 +43,47 @@ class MemoryOperator:
         '单位换算', '多少钱', '怎么走'
     ]
     
-    def __init__(self, llm_client=None, similarity_threshold: float = 0.7, backend=None):
+    # 修正信号（与 memory.py 的 OVERRIDE_SIGNALS_TIER1/TIER2 保持一致，
+    # memory.py 构造时会显式传入自己的列表）
+    # Tier 1: 高置信度修正 → 旧记忆强降权
+    OVERRIDE_SIGNALS_TIER1 = [
+        '不再', '改成', '换成', '搬到', '现在是', '已经是', '不是', '而是',
+        '修正', '更正', '变成', '其实是', '实际上', '事实上', '准确说',
+    ]
+    # Tier 2: 中置信度修正 → 旧记忆弱降权
+    OVERRIDE_SIGNALS_TIER2 = [
+        '逗你的', '开玩笑', '骗你的', '瞎说的', '胡说', '说错了', '说反了', '搞错了', '弄错了',
+    ]
+
+    def __init__(
+        self,
+        llm_client=None,
+        similarity_threshold: float = 0.6,
+        conflict_threshold: float = 0.3,
+        backend=None,
+        override_signals: Optional[Tuple[List[str], List[str]]] = None,
+    ):
         """
         初始化
-        
+
         Args:
             llm_client: LLM 客户端（可选，用于复杂决策）
-            similarity_threshold: 语义相似度阈值
+            similarity_threshold: 无修正信号时，重叠率达到此值视为同一条记忆（合并）
+            conflict_threshold: 带修正信号时，重叠率达到此值视为在修正旧记忆
             backend: SQLite 后端（用于冲突解决）
+            override_signals: (tier1, tier2) 修正信号列表，默认用类常量
         """
         self.llm_client = llm_client
         self.similarity_threshold = similarity_threshold
+        self.conflict_threshold = conflict_threshold
         self.backend = backend
+        if override_signals:
+            self.override_tier1, self.override_tier2 = override_signals
+        else:
+            self.override_tier1 = self.OVERRIDE_SIGNALS_TIER1
+            self.override_tier2 = self.OVERRIDE_SIGNALS_TIER2
+        # 最近一次 DELETE 决策对应的修正信号层级（1/2），供调用方决定降权力度
+        self.last_override_tier = 0
         
         # 冲突解决器
         from conflict_resolver import ConflictResolver
@@ -111,33 +139,30 @@ class MemoryOperator:
             return ('ADD', None)
         
         # ============================================================
-        # 第二层：语义相似度检测（本地模型，0 Token）
+        # 第二层：字面相似度检测（0 Token）
         # ============================================================
         
-        # 2.1 查找潜在冲突
-        conflicts = self._find_conflicts_by_similarity(new_memory, existing_memories)
+        target, similarity = self._find_most_similar(new_memory, existing_memories)
         
-        # 2.2 如果没有冲突，直接添加
-        if not conflicts:
-            self.stats['add'] += 1
-            return ('ADD', None)
+        # 2.1 内容完全相同 → 重复
+        if target is not None and self._normalize(new_memory['content']) == self._normalize(target['content']):
+            self.stats['noop'] += 1
+            return ('NOOP', None)
         
-        # ============================================================
-        # 第三层：LLM 决策（仅在有冲突时调用）
-        # ============================================================
+        # 2.2 带修正信号且说的是同一件事 → 降权旧记忆，保留新记忆
+        tier = self._override_tier(new_memory['content'])
+        if tier and target is not None and similarity >= self.conflict_threshold:
+            self.last_override_tier = tier
+            self.stats['delete'] += 1
+            return ('DELETE', target)
         
-        # 3.1 如果有 LLM 客户端，使用 LLM 决策
-        if self.llm_client:
-            operation, target = self._llm_decide(new_memory, conflicts)
-            self.stats['llm_calls'] += 1
-        else:
-            # 3.2 否则使用规则决策
-            operation, target = self._rule_based_decide(new_memory, conflicts)
+        # 2.3 无修正信号但高度相似 → 合并
+        if target is not None and similarity >= self.similarity_threshold:
+            self.stats['update'] += 1
+            return ('UPDATE', target)
         
-        # 更新统计
-        self.stats[operation.lower()] += 1
-        
-        return (operation, target)
+        self.stats['add'] += 1
+        return ('ADD', None)
     
     # ================================================================
     # 第一层：规则快速过滤
@@ -156,192 +181,78 @@ class MemoryOperator:
         return self.noise_filter.is_noise(memory)
     
     # ================================================================
-    # 第二层：语义相似度检测
+    # 第二层：相似度与修正信号
     # ================================================================
     
-    def _find_conflicts_by_similarity(
+    def _find_most_similar(
         self, 
         new_memory: Dict, 
         existing_memories: List[Dict]
-    ) -> List[Dict]:
+    ) -> Tuple[Optional[Dict], float]:
         """
-        通过语义相似度查找潜在冲突
+        找出与新记忆最相似的旧记忆
         
-        冲突定义：
-        1. 语义相似度 > threshold（说的是同一件事）
-        2. 内容存在矛盾（使用规则或 LLM 检测）
-        
-        Args:
-            new_memory: 新记忆
-            existing_memories: 已有记忆列表
+        两边都有实体且没有交集时跳过；任一边没有实体（实体提取未启用或没提取到）
+        时照常比较，避免实体为空导致所有比较被跳过。
         
         Returns:
-            冲突的记忆列表
+            (最相似的旧记忆, 相似度)；没有可比较的记忆时返回 (None, 0.0)
         """
-        conflicts = []
+        best, best_sim = None, 0.0
+        new_entities = set(new_memory.get('entities') or [])
         
         for old in existing_memories:
-            # 1. 检查实体重叠（快速过滤）
-            if not self._has_entity_overlap(new_memory, old):
+            old_entities = set(old.get('entities') or [])
+            if new_entities and old_entities and not (new_entities & old_entities):
                 continue
             
-            # 2. 计算语义相似度
-            similarity = self._calculate_similarity(
-                new_memory['content'], 
-                old['content']
-            )
-            
-            # 3. 如果相似度高，检查是否矛盾
-            if similarity > self.similarity_threshold:
-                if self._is_contradictory(new_memory, old):
-                    conflicts.append(old)
+            sim = self._calculate_similarity(new_memory['content'], old['content'])
+            if sim > best_sim:
+                best, best_sim = old, sim
         
-        return conflicts
-    
-    def _has_entity_overlap(self, mem1: Dict, mem2: Dict) -> bool:
-        """检查两条记忆是否有实体重叠"""
-        entities1 = set(mem1.get('entities', []))
-        entities2 = set(mem2.get('entities', []))
-        return bool(entities1 & entities2)
+        return best, best_sim
     
     def _calculate_similarity(self, text1: str, text2: str) -> float:
         """
-        计算语义相似度
+        字面相似度：字符 2-gram 重叠数 / 较短一方的 2-gram 数
         
-        当前实现：简单的词汇重叠（Jaccard 相似度）
-        TODO: 可以替换为更好的语义模型（如 SentenceBERT）
-        
-        Args:
-            text1: 文本 1
-            text2: 文本 2
+        用较短一方做分母，短句补充长句（包含关系）时得分高；
+        一方是另一方的子串时直接返回 1.0。
         
         Returns:
             相似度 [0, 1]
         """
-        # 分词（简单实现）
-        words1 = set(self._tokenize(text1))
-        words2 = set(self._tokenize(text2))
-        
-        # Jaccard 相似度
-        if not words1 or not words2:
+        n1, n2 = self._normalize(text1), self._normalize(text2)
+        if not n1 or not n2:
             return 0.0
+        if n1 in n2 or n2 in n1:
+            return 1.0
         
-        intersection = words1 & words2
-        union = words1 | words2
-        
-        return len(intersection) / len(union)
+        grams1, grams2 = self._bigrams(n1), self._bigrams(n2)
+        if not grams1 or not grams2:
+            return 0.0
+        return len(grams1 & grams2) / min(len(grams1), len(grams2))
     
-    def _tokenize(self, text: str) -> List[str]:
-        """简单分词"""
-        # 移除标点
-        text = re.sub(r'[^\w\s]', ' ', text)
-        # 分词
-        words = text.lower().split()
-        # 过滤停用词
-        stopwords = {'的', '了', '在', '是', '我', '你', '他', '她', '它', 
-                     'the', 'a', 'an', 'is', 'are', 'was', 'were'}
-        return [w for w in words if w not in stopwords and len(w) > 1]
+    @staticmethod
+    def _normalize(text: str) -> str:
+        """去掉标点和空白、转小写，用于比较"""
+        return re.sub(r'[^\w]', '', text.lower())
     
-    def _is_contradictory(self, new: Dict, old: Dict) -> bool:
-        """
-        检查两条记忆是否矛盾
-        
-        当前实现：基于规则的简单检测
-        TODO: 可以使用 LLM 进行更准确的矛盾检测
-        
-        Args:
-            new: 新记忆
-            old: 旧记忆
-        
-        Returns:
-            是否矛盾
-        """
-        # 矛盾信号词
-        contradiction_signals = [
-            ('不再', '现在'), ('改成', '变成'), ('搬到', '从'),
-            ('不是', '其实'), ('实际上', '之前'), ('更正', '修正'),
-            ('no longer', 'now'), ('changed to', 'moved to'),
-            ('actually', 'not'), ('correction', 'update')
-        ]
-        
-        new_content = new['content'].lower()
-        
-        # 检查新记忆是否包含矛盾信号
-        for signal1, signal2 in contradiction_signals:
-            if signal1 in new_content or signal2 in new_content:
-                return True
-        
-        # 检查时间戳（如果新记忆更新，可能是更正）
-        new_time = new.get('timestamp', '')
-        old_time = old.get('timestamp', '')
-        
-        if new_time and old_time and new_time > old_time:
-            # 如果时间差 > 7 天，可能是状态变化
-            try:
-                new_dt = datetime.fromisoformat(new_time)
-                old_dt = datetime.fromisoformat(old_time)
-                if (new_dt - old_dt).days > 7:
-                    return True
-            except:
-                pass
-        
-        return False
+    @staticmethod
+    def _bigrams(text: str) -> set:
+        """中文按字切 2-gram，英文/数字按单词切分"""
+        grams = set(re.findall(r'[a-z0-9]+', text))
+        chinese = re.findall(r'[\u4e00-\u9fff]', text)
+        grams.update(chinese[i] + chinese[i + 1] for i in range(len(chinese) - 1))
+        return grams
     
-    # ================================================================
-    # 第三层：决策逻辑
-    # ================================================================
-    
-    def _llm_decide(
-        self, 
-        new_memory: Dict, 
-        conflicts: List[Dict]
-    ) -> Tuple[str, Optional[Dict]]:
-        """
-        使用 LLM 决策（复杂场景）
-        
-        Args:
-            new_memory: 新记忆
-            conflicts: 冲突的旧记忆列表
-        
-        Returns:
-            (操作类型, 目标记忆)
-        """
-        # TODO: 实现 LLM 调用逻辑
-        # 这里先使用规则决策作为 fallback
-        return self._rule_based_decide(new_memory, conflicts)
-    
-    def _rule_based_decide(
-        self, 
-        new_memory: Dict, 
-        conflicts: List[Dict]
-    ) -> Tuple[str, Optional[Dict]]:
-        """
-        基于规则的决策（简单场景）
-        
-        使用 ConflictResolver 进行智能决策
-        
-        Args:
-            new_memory: 新记忆
-            conflicts: 冲突的旧记忆列表
-        
-        Returns:
-            (操作类型, 目标记忆)
-        """
-        # 选择最相关的冲突（第一个）
-        target = conflicts[0]
-        
-        # 使用 ConflictResolver 解决冲突
-        resolution = self.conflict_resolver.resolve(new_memory, target)
-        
-        action = resolution['action']
-        
-        if action == 'UPDATE':
-            return ('UPDATE', target)
-        elif action == 'KEEP':
-            return ('NOOP', None)
-        else:  # MERGE
-            return ('ADD', None)
-    
+    def _override_tier(self, content: str) -> int:
+        """新记忆中的修正信号层级：1 强 / 2 弱 / 0 无"""
+        if any(signal in content for signal in self.override_tier1):
+            return 1
+        if any(signal in content for signal in self.override_tier2):
+            return 2
+        return 0
     
     # ================================================================
     # 工具方法

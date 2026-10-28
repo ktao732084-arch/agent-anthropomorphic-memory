@@ -8,28 +8,33 @@ python3 tests/test_v1_1_5.py
 python3 tests/test_v1_1_6.py
 python3 tests/test_v1_1_7.py
 python3 tests/test_concurrent.py
+python3 tests/test_dedup_regression.py
 ```
 
-## 当前状态（2026-07）
+## 当前状态（2026-10）
 
 | 文件 | 覆盖对象 | 结果 |
 |------|---------|------|
 | test_v1.1.py | legacy/v1_1_config + v1_1_helpers（重要性分级、时间敏感） | ✅ 全部通过 |
 | test_v1_1_5.py | legacy/v1_1_5_entity_system（三层实体识别） | ✅ 8/8 |
-| test_v1_1_6.py | src/memory.py（引号实体、去重阈值、冲突降权） | ⚠️ 11/17，见下 |
+| test_v1_1_6.py | src/memory.py（引号实体、去重阈值、冲突降权） | ✅ 17/17 |
 | test_v1_1_7.py | legacy/v1_1_7_llm_integration（语义复杂度、LLM 兜底） | ✅ 29/29 |
 | test_concurrent.py | legacy/sqlite_backend_v1_2_5（线程安全） | ✅ 全部通过 |
+| test_dedup_regression.py | src/memory.py + memory_operator（无实体修正、完全重复、同批次去重、误合并） | ✅ 5/5 |
 
-## 已知失败（如实记录，待修）
+## 已修复的回归（2026-10）
 
-**test_v1_1_6.py 有 6 个用例失败**：v1.1.6 引入的"冲突柔性降权"（OVERRIDE_SIGNALS
-Tier 1/Tier 2 信号触发降权）和部分去重阈值行为，在后续版本迭代（v1.3.0 引入
-MemoryOperator/ConflictResolver 接管去重路径）后已回归，现行代码不再触发这些降权。
-失败用例：短句高重叠、包含关系、Tier 1"其实是"、Tier 2"逗你的"/"开玩笑"、花生冲突场景。
+v1.3.0 引入 MemoryOperator 接管去重路径后，"冲突柔性降权"和去重阈值一度失效，
+test_v1_1_6.py 曾有 6 个用例失败。原因是 MemoryOperator 要求两条记忆有共同实体才比较
+（默认配置下实体常为空），且按空格分词（中文没有空格，相似度恒为 0）。现已改为字符
+2-gram 重叠率 + 分层修正信号，与 v1.1.6 的语义一致，并新增 test_dedup_regression.py。
+
+已知局限：相似度是字面重叠，不是语义相似。像"我对花生过敏" → "逗你的，我其实最喜欢吃花生"
+这类几乎不共享文字的反转仍检测不到，需要后续接入语义模型或 LLM。
 
 ## 覆盖缺口（如实说明）
 
 - `src/memory.py` 的 consolidation 主流程、`src/sqlite_backend.py`、
-  `src/conflict_resolver.py`、`src/memory_operator.py`、`src/noise_filter.py`
+  `src/conflict_resolver.py`、`src/noise_filter.py`
   没有独立测试文件，仅有各模块 `__main__` 中的冒烟断言
   （如 `python3 src/noise_filter.py`，当前 13/14 通过）。

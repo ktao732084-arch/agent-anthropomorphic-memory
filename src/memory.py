@@ -23,6 +23,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -500,8 +501,6 @@ OVERRIDE_SIGNALS_TIER1 = [
     "已经是",
     "不是",
     "而是",
-    "从",
-    "到",
     "修正",
     "更正",
     "变成",
@@ -512,7 +511,7 @@ OVERRIDE_SIGNALS_TIER1 = [
 ]
 
 # Tier 2: 中置信度修正信号 → 标记为"可能冲突",降权但不自动覆盖
-OVERRIDE_SIGNALS_TIER2 = ["逗你的", "开玩笑", "骗你的", "瞎说的", "胡说", "刚才说错了", "说反了", "搞错了", "弄错了"]
+OVERRIDE_SIGNALS_TIER2 = ["逗你的", "开玩笑", "骗你的", "瞎说的", "胡说", "说错了", "说反了", "搞错了", "弄错了"]
 
 # 合并(向后兼容)
 OVERRIDE_SIGNALS = OVERRIDE_SIGNALS_TIER1 + OVERRIDE_SIGNALS_TIER2
@@ -1062,7 +1061,8 @@ type 可选值:
 
 # v1.1.6: 去重配置
 DEDUP_CONFIG = {
-    "min_overlap_ratio": 0.3,  # 最小重叠比例(30%)
+    "min_overlap_ratio": 0.3,  # 带修正信号时,重叠比例达到 30% 视为在修正旧记忆
+    "merge_overlap_ratio": 0.6,  # 无修正信号时,重叠比例达到 60% 视为同一条记忆(合并)
     "tier1_penalty": 0.1,  # Tier 1 信号:强降权(保留 10%)
     "tier2_penalty": 0.4,  # Tier 2 信号:弱降权(保留 40%)
 }
@@ -1103,15 +1103,23 @@ def deduplicate_facts(new_facts, existing_facts):
     if HALLUCINATION_DEFENSE_ENABLED:
         try:
             return _deduplicate_with_operator(new_facts, existing_facts)
-        except Exception:
-            pass  # 降级到原有逻辑
+        except Exception as e:
+            print(f"⚠️ MemoryOperator 去重失败,降级到旧版规则: {e}", file=sys.stderr)
 
     return _deduplicate_legacy(new_facts, existing_facts)
 
 
 def _deduplicate_with_operator(new_facts, existing_facts):
-    """v1.3.0: 使用 MemoryOperator + ConflictResolver 去重"""
-    operator = MemoryOperator()
+    """v1.3.0: 使用 MemoryOperator + ConflictResolver 去重
+
+    existing_facts 中被合并/降权的记录会被原地修改,调用方需要回写。
+    同一批新 facts 之间也会互相去重。
+    """
+    operator = MemoryOperator(
+        similarity_threshold=DEDUP_CONFIG["merge_overlap_ratio"],
+        conflict_threshold=DEDUP_CONFIG["min_overlap_ratio"],
+        override_signals=(OVERRIDE_SIGNALS_TIER1, OVERRIDE_SIGNALS_TIER2),
+    )
     resolver = ConflictResolver()
 
     merged = []
@@ -1119,7 +1127,7 @@ def _deduplicate_with_operator(new_facts, existing_facts):
     downgraded_count = 0
 
     for new_fact in new_facts:
-        operation, target = operator.decide_operation(new_fact, existing_facts)
+        operation, target = operator.decide_operation(new_fact, existing_facts + merged)
 
         if operation == "NOOP":
             duplicate_count += 1
@@ -1135,14 +1143,15 @@ def _deduplicate_with_operator(new_facts, existing_facts):
                 target["importance"] = new_fact.get("importance", target["importance"])
                 target["score"] = max(target.get("score", 0), new_fact.get("score", 0))
                 target["updated"] = now_iso()
-                target["supersedes"] = json.dumps([target.get("id")])
-                downgraded_count += 1
-            else:
-                # KEEP 旧记忆,丢弃新记忆
-                duplicate_count += 1
+                target["merged_from"] = new_fact["id"]
+            # 否则 KEEP 旧记忆,丢弃新记忆
+            duplicate_count += 1
 
         elif operation == "DELETE" and target:
-            target["score"] = target.get("score", 0.5) * 0.1
+            tier = operator.last_override_tier
+            penalty = DEDUP_CONFIG["tier1_penalty"] if tier == 1 else DEDUP_CONFIG["tier2_penalty"]
+            target["score"] = target.get("score", target.get("importance", 0.5)) * penalty
+            target["override_tier"] = tier
             target["conflict_downgraded"] = True
             target["downgrade_reason"] = new_fact["id"]
             target["downgrade_at"] = now_iso()
@@ -2616,8 +2625,11 @@ def cmd_capture(args):
         print("❌ 错误: 内容不能为空")
         return
 
+    # 未指定 importance 时按规则计算(与 consolidate Phase 2 一致)
+    if importance is None:
+        importance, _ = calculate_importance(content)
     # 限制 importance 在 0-1 范围
-    if importance < 0:
+    elif importance < 0:
         importance = 0
         print("⚠️ 警告: importance 已调整为 0")
     elif importance > 1:
@@ -2638,16 +2650,28 @@ def cmd_capture(args):
     if mem_type == "belief":
         record["confidence"] = args.confidence
 
-    # 追加到对应文件
     if mem_type == "fact":
+        # facts 与 consolidate Phase 4a 走同一套去重/冲突检测
         path = memory_dir / "layer2/active/facts.jsonl"
-    elif mem_type == "belief":
-        path = memory_dir / "layer2/active/beliefs.jsonl"
+        existing_facts = load_jsonl(path)
+        merged, dup_count, downgrade_count = deduplicate_facts([record], existing_facts)
+        if not merged:
+            # 旧记忆可能已被新内容更新,回写后重建索引
+            save_jsonl(path, existing_facts)
+            rebuild_index(memory_dir)
+            print("ℹ️ 与已有记忆重复,已合并,未新增")
+            return
+        if downgrade_count:
+            save_jsonl(path, existing_facts + merged)
+            print(f"⚠️ 检测到修正,已降权 {downgrade_count} 条旧记忆")
+        else:
+            append_jsonl(path, record)
     else:
-        path = memory_dir / "layer2/active/summaries.jsonl"
+        path = memory_dir / f"layer2/active/{mem_type}s.jsonl"
+        append_jsonl(path, record)
 
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    # 立即更新索引,不必等下一次 consolidate 才能检索到
+    rebuild_index(memory_dir)
 
     print(f"✅ 记忆已添加: {record['id']}")
     print(f"   类型: {mem_type}")
@@ -2690,6 +2714,66 @@ def cmd_archive(args):
 # ============================================================
 # Consolidation 命令
 # ============================================================
+
+
+def rebuild_index(memory_dir):
+    """重建关键词索引和实体关系索引(Phase 6,capture 后也会调用)"""
+    keywords_index = {}
+    relations_index = {}
+
+    # 中文分词辅助函数
+    def extract_keywords(text):
+        """提取关键词(改进版:保留连字符词)"""
+        import re
+
+        keywords = set()
+
+        # 1. 优先提取连字符词(memory-system, v1.1, API-key等)
+        hyphen_words = re.findall(r"[a-zA-Z0-9][-a-zA-Z0-9.]+", text)
+        for word in hyphen_words:
+            if len(word) > 1:
+                keywords.add(word.lower())
+
+        # 2. 中文:整段 + 2-gram(v1.4.1 修复)
+        #    旧版把整句连续中文当作单个索引键,导致查询"医学生"
+        #    永远匹配不到索引键"用户是医学生"。
+        #    现在对每段连续中文同时索引整段(支持全短语查询)和
+        #    2-gram,与 keyword_search 查询端的 2-4 字子串切分保证有交集。
+        chinese_runs = re.findall(r"[\u4e00-\u9fa5]{2,}", text)
+        for run in chinese_runs:
+            keywords.add(run)
+            for i in range(len(run) - 1):
+                keywords.add(run[i : i + 2])
+
+        # 3. 提取纯英文单词(不含连字符的)
+        english_words = re.findall(r"\b[a-zA-Z]{2,}\b", text)
+        for word in english_words:
+            keywords.add(word.lower())
+
+        return keywords
+
+    for mem_type in ["facts", "beliefs", "summaries"]:
+        records = load_jsonl(memory_dir / f"layer2/active/{mem_type}.jsonl")
+        for r in records:
+            # 改进的关键词提取
+            content = r.get("content", "")
+            keywords = extract_keywords(content)
+            for word in keywords:
+                if word not in keywords_index:
+                    keywords_index[word] = []
+                if r["id"] not in keywords_index[word]:
+                    keywords_index[word].append(r["id"])
+
+            # 实体关系
+            for entity in r.get("entities", []):
+                if entity not in relations_index:
+                    relations_index[entity] = {"facts": [], "beliefs": [], "summaries": []}
+                relations_index[entity][mem_type].append(r["id"])
+
+    with open(memory_dir / "layer2/index/keywords.json", "w", encoding="utf-8") as f:
+        json.dump(keywords_index, f, indent=2, ensure_ascii=False)
+    with open(memory_dir / "layer2/index/relations.json", "w", encoding="utf-8") as f:
+        json.dump(relations_index, f, indent=2, ensure_ascii=False)
 
 
 def cmd_consolidate(args):
@@ -2819,12 +2903,12 @@ def cmd_consolidate(args):
             if new_facts:
                 merged_facts, dup_count, downgrade_count = deduplicate_facts(new_facts, existing_facts)
                 print(f"       新增: {len(merged_facts)}, 去重: {dup_count}, 降权: {downgrade_count}")
-                # 追加新 facts
-                for fact in merged_facts:
-                    append_jsonl(memory_dir / "layer2/active/facts.jsonl", fact)
-                # 如果有降权,需要重写 existing_facts
-                if downgrade_count > 0:
-                    save_jsonl(memory_dir / "layer2/active/facts.jsonl", existing_facts)
+                if dup_count or downgrade_count:
+                    # 旧 facts 被原地合并/降权,与新 facts 一起整体重写
+                    save_jsonl(memory_dir / "layer2/active/facts.jsonl", existing_facts + merged_facts)
+                else:
+                    for fact in merged_facts:
+                        append_jsonl(memory_dir / "layer2/active/facts.jsonl", fact)
             else:
                 print("       [跳过] 无新 facts")
 
@@ -2970,63 +3054,7 @@ def cmd_consolidate(args):
         # Phase 6: 索引更新
         if not args.phase or args.phase == 6:
             print("\n📇 Phase 6: 索引更新")
-            # 重建关键词索引
-            keywords_index = {}
-            relations_index = {}
-
-            # 中文分词辅助函数
-            def extract_keywords(text):
-                """提取关键词(改进版:保留连字符词)"""
-                import re
-
-                keywords = set()
-
-                # 1. 优先提取连字符词(memory-system, v1.1, API-key等)
-                hyphen_words = re.findall(r"[a-zA-Z0-9][-a-zA-Z0-9.]+", text)
-                for word in hyphen_words:
-                    if len(word) > 1:
-                        keywords.add(word.lower())
-
-                # 2. 中文:整段 + 2-gram(v1.4.1 修复)
-                #    旧版把整句连续中文当作单个索引键,导致查询"医学生"
-                #    永远匹配不到索引键"用户是医学生"。
-                #    现在对每段连续中文同时索引整段(支持全短语查询)和
-                #    2-gram,与 keyword_search 查询端的 2-4 字子串切分保证有交集。
-                chinese_runs = re.findall(r"[\u4e00-\u9fa5]{2,}", text)
-                for run in chinese_runs:
-                    keywords.add(run)
-                    for i in range(len(run) - 1):
-                        keywords.add(run[i : i + 2])
-
-                # 3. 提取纯英文单词(不含连字符的)
-                english_words = re.findall(r"\b[a-zA-Z]{2,}\b", text)
-                for word in english_words:
-                    keywords.add(word.lower())
-
-                return keywords
-
-            for mem_type in ["facts", "beliefs", "summaries"]:
-                records = load_jsonl(memory_dir / f"layer2/active/{mem_type}.jsonl")
-                for r in records:
-                    # 改进的关键词提取
-                    content = r.get("content", "")
-                    keywords = extract_keywords(content)
-                    for word in keywords:
-                        if word not in keywords_index:
-                            keywords_index[word] = []
-                        if r["id"] not in keywords_index[word]:
-                            keywords_index[word].append(r["id"])
-
-                    # 实体关系
-                    for entity in r.get("entities", []):
-                        if entity not in relations_index:
-                            relations_index[entity] = {"facts": [], "beliefs": [], "summaries": []}
-                        relations_index[entity][mem_type].append(r["id"])
-
-            with open(memory_dir / "layer2/index/keywords.json", "w", encoding="utf-8") as f:
-                json.dump(keywords_index, f, indent=2, ensure_ascii=False)
-            with open(memory_dir / "layer2/index/relations.json", "w", encoding="utf-8") as f:
-                json.dump(relations_index, f, indent=2, ensure_ascii=False)
+            rebuild_index(memory_dir)
 
             print("   ✅ 完成")
 
@@ -4384,7 +4412,7 @@ def main():
     parser_capture = subparsers.add_parser("capture", help="手动添加记忆")
     parser_capture.add_argument("content", help="记忆内容")
     parser_capture.add_argument("--type", choices=["fact", "belief", "summary"], default="fact", help="记忆类型")
-    parser_capture.add_argument("--importance", type=float, default=0.5, help="重要性 (0-1)")
+    parser_capture.add_argument("--importance", type=float, default=None, help="重要性 (0-1),不指定则按规则自动计算")
     parser_capture.add_argument("--confidence", type=float, default=0.6, help="置信度 (belief 专用)")
     parser_capture.add_argument("--entities", default="", help="相关实体,逗号分隔")
     parser_capture.set_defaults(func=cmd_capture)

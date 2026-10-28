@@ -3,9 +3,8 @@
 Memory System v1.1.6 测试
 测试 Crabby 指出的三个问题的修复
 
-⚠️ 已知状态（2026-07）：当前 11/17 通过。
-v1.1.6 的"冲突柔性降权"在 v1.3.0 引入 MemoryOperator/ConflictResolver
-接管去重路径后已回归，6 个降权/去重用例失败，详见 tests/README.md。
+v1.3.0 引入 MemoryOperator 后这里曾有 6 个降权/去重用例回归，
+2026-10 已修复，详见 tests/README.md。
 """
 
 import sys
