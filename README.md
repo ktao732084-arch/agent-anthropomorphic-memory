@@ -37,6 +37,7 @@ src/
 ├── 智能层（被 memory.py 主流程使用）
 │   ├── temporal.py          # 相对时间 → 绝对日期（"下周三" → 2026-11-04）
 │   ├── embeddings.py        # 可选语义检索（OpenAI 兼容接口 / 本地 ONNX），默认关闭
+│   ├── llm_judge.py         # 可选 LLM 写入判断（重复 / 取代 / 新增），默认关闭
 │   ├── noise_filter.py      # 虚假记忆/废话过滤
 │   ├── memory_operator.py   # ADD/UPDATE/DELETE/NOOP 决策器
 │   └── conflict_resolver.py # 冲突检测与消解

@@ -13,6 +13,7 @@
     python3 eval/run_eval.py -v                 # 打印每条失败断言及当时的活跃记忆
     python3 eval/run_eval.py --only correction  # 只跑 id 以此开头的用例
     python3 eval/run_eval.py --json out.json    # 保存逐条结果
+    python3 eval/run_eval.py --llm              # 启用 LLM 写入判断（需 OPENAI_API_KEY 等，见 src/llm_judge.py）
 
 用例格式见 eval/README.md。
 """
@@ -42,9 +43,14 @@ METRICS = {
 }
 
 
+# 由 --llm 决定:默认去掉 API Key,只评测规则(+可选语义向量)路径,结果可复现
+LLM_ENV = {}
+
+
 def run_cli(memory_dir, now, *args):
-    env = {**os.environ, "MEMORY_DIR": str(memory_dir), "MEMORY_NOW": now}
-    env.pop("OPENAI_API_KEY", None)  # 评测纯规则路径,结果可复现
+    env = {**os.environ, "MEMORY_DIR": str(memory_dir), "MEMORY_NOW": now, **LLM_ENV}
+    if env.get("MEMORY_LLM_JUDGE") != "on":
+        env.pop("OPENAI_API_KEY", None)
     proc = subprocess.run(
         [sys.executable, str(MEMORY_PY), *args], env=env, capture_output=True, text=True, timeout=120
     )
@@ -202,10 +208,16 @@ def main():
     parser.add_argument("--json", help="逐条结果写入该文件")
     parser.add_argument("-j", "--jobs", type=int, default=8)
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("--llm", action="store_true", help="启用 LLM 写入判断(关闭旧的 LLM 兜底,只评测判断本身)")
     args = parser.parse_args()
 
+    LLM_ENV.update(
+        {"MEMORY_LLM_JUDGE": "on", "MEMORY_LLM_ENABLED": "false"} if args.llm else {"MEMORY_LLM_JUDGE": "off"}
+    )
+
     cases = load_cases(args.only)
-    print(f"运行 {len(cases)} 个用例（模式: {args.mode}, k={args.k}）\n")
+    semantic = os.environ.get("MEMORY_EMBEDDING_PROVIDER", "none")
+    print(f"运行 {len(cases)} 个用例（模式: {args.mode}, k={args.k}, 语义向量: {semantic}, LLM 判断: {'开' if args.llm else '关'}）\n")
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         per_case = list(pool.map(lambda c: run_case(c, args.mode, args.k), cases))
     results = [r for rs in per_case for r in rs]

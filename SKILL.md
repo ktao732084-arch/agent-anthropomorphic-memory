@@ -121,4 +121,20 @@ export MEMORY_EMBEDDING_QUERY_PREFIX="为这个句子生成表示以用于检索
 用 `status` 查看是否生效。向量缓存在 `memory/layer2/index/embeddings.json`，每条记忆只算一次；
 服务不可用时自动退回关键词检索。语义相似度只用于检索和匹配更正，不会据此合并记忆。
 
+### 可选：LLM 写入判断
+
+规则只能识别带更正词的更正（"其实是""不再"……）。"我和苏晴分手了"、"减肥结束了"这类没有更正词的变化，
+以及换个说法的重复，需要 LLM 判断：
+
+```bash
+export MEMORY_LLM_JUDGE=on
+export OPENAI_API_KEY=...                       # 任何 OpenAI 兼容的 /chat/completions 接口
+export OPENAI_BASE_URL=https://api.openai.com/v1
+export MEMORY_LLM_JUDGE_MODEL=gpt-4o-mini       # 可选
+```
+
+只在规则判为"新增"、且存在相关旧记忆时调用（每条新记忆最多一次）；判为"取代"的旧记忆归档而非删除，
+`history.jsonl` 里记录 `decided_by: llm` 和理由，可以追查。调用失败时按规则处理。
+建议同时开启语义检索，否则候选旧记忆只能按字面挑选，会漏掉"住在北京 / 住在上海"这类。
+
 架构、评分公式、衰减参数见 [references/architecture.md](references/architecture.md)。

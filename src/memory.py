@@ -29,6 +29,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from embeddings import VectorStore, cosine, get_embedder
+from llm_judge import get_judge
 from embeddings import load_settings as load_embedding_settings
 from temporal import ground_relative_dates
 
@@ -1247,6 +1248,7 @@ def _deduplicate_with_operator(new_facts, existing_facts, events=None):
             }
         except Exception as e:
             print(f"⚠️ 语义向量不可用,仅用字面相似度: {e}", file=sys.stderr)
+            store = None
 
     operator = MemoryOperator(
         similarity_threshold=DEDUP_CONFIG["merge_overlap_ratio"],
@@ -1254,12 +1256,25 @@ def _deduplicate_with_operator(new_facts, existing_facts, events=None):
         override_signals=(OVERRIDE_SIGNALS_TIER1, OVERRIDE_SIGNALS_TIER2),
         **semantic_kwargs,
     )
+    # LLM 判断(可选):规则判为新增时,对照相关旧记忆判断是否重复或已被取代
+    judge = get_judge()
+
     merged = []
     duplicate_count = 0
     downgraded_count = 0
 
     for new_fact in new_facts:
         operation, target = operator.decide_operation(new_fact, existing_facts + merged)
+        targets = [target] if target else []
+        llm = None
+
+        if operation == "ADD" and judge:
+            candidates = _judge_candidates(new_fact, existing_facts + merged, store, operator, judge.settings)
+            verdict = judge.judge(new_fact, candidates)
+            if verdict and verdict["decision"] != "ADD":
+                llm = {"decided_by": "llm", "reason": verdict["reason"]}
+                targets = verdict["targets"]
+                operation = "UPDATE" if verdict["decision"] == "DUPLICATE" else "SUPERSEDE"
 
         if operation == "NOOP":
             duplicate_count += 1
@@ -1269,50 +1284,83 @@ def _deduplicate_with_operator(new_facts, existing_facts, events=None):
             merged.append(new_fact)
             events.append({"op": "ADD", "id": new_fact["id"], "content": new_fact["content"]})
 
-        elif operation == "UPDATE" and target:
-            # 同一件事的两种说法:保留更完整的那一种("我喜欢跑步" → "我喜欢跑步,每周跑三次")
-            if len(MemoryOperator._normalize(new_fact["content"])) > len(MemoryOperator._normalize(target["content"])):
-                events.append(
-                    {
-                        "op": "MERGE",
-                        "id": target["id"],
-                        "from": new_fact["id"],
-                        "old_content": target["content"],
-                        "content": new_fact["content"],
-                    }
-                )
-                # 用新记忆内容更新旧记忆
-                target["content"] = new_fact["content"]
-                target["importance"] = max(target.get("importance", 0), new_fact.get("importance", 0))
-                target["score"] = max(target.get("score", 0), new_fact.get("score", 0))
-                target["updated"] = now_iso()
-                target["merged_from"] = new_fact["id"]
+        elif operation == "UPDATE" and targets:
+            _merge_duplicate(targets[0], new_fact, events, llm)
             duplicate_count += 1
 
-        elif operation == "DELETE" and target:
-            tier = operator.last_override_tier
-            penalty = DEDUP_CONFIG["tier1_penalty"] if tier == 1 else DEDUP_CONFIG["tier2_penalty"]
-            target["score"] = target.get("score", target.get("importance", 0.5)) * penalty
-            target["override_tier"] = tier
-            target["conflict_downgraded"] = True
-            target["downgrade_reason"] = new_fact["id"]
-            target["downgrade_at"] = now_iso()
-            if tier == 1:
-                target["invalid_at"] = new_fact.get("created", now_iso())
-                target["superseded_by"] = new_fact["id"]
+        elif operation == "DELETE" and targets:
+            _supersede(targets[0], new_fact, operator.last_override_tier, events)
             merged.append(new_fact)
             downgraded_count += 1
-            events.append(
-                {
-                    "op": "INVALIDATE" if tier == 1 else "DOWNGRADE",
-                    "id": target["id"],
-                    "by": new_fact["id"],
-                    "content": target["content"],
-                }
-            )
+            events.append({"op": "ADD", "id": new_fact["id"], "content": new_fact["content"]})
+
+        elif operation == "SUPERSEDE" and targets:
+            for old in targets:
+                _supersede(old, new_fact, 1, events, llm)
+            merged.append(new_fact)
+            downgraded_count += len(targets)
             events.append({"op": "ADD", "id": new_fact["id"], "content": new_fact["content"]})
 
     return merged, duplicate_count, downgraded_count
+
+
+def _merge_duplicate(target, new_fact, events, llm=None):
+    """同一件事的两种说法:保留更完整的那一种("我喜欢跑步" → "我喜欢跑步,每周跑三次")"""
+    if len(MemoryOperator._normalize(new_fact["content"])) > len(MemoryOperator._normalize(target["content"])):
+        events.append(
+            {
+                "op": "MERGE",
+                "id": target["id"],
+                "from": new_fact["id"],
+                "old_content": target["content"],
+                "content": new_fact["content"],
+                **(llm or {}),
+            }
+        )
+        target["content"] = new_fact["content"]
+        target["importance"] = max(target.get("importance", 0), new_fact.get("importance", 0))
+        target["score"] = max(target.get("score", 0), new_fact.get("score", 0))
+        target["updated"] = now_iso()
+        target["merged_from"] = new_fact["id"]
+    else:
+        events.append(
+            {"op": "NOOP", "id": new_fact["id"], "content": new_fact["content"], "duplicate_of": target["id"], **(llm or {})}
+        )
+
+
+def _supersede(target, new_fact, tier, events, llm=None):
+    """新记忆更正旧记忆:强更正(tier 1)写入 invalid_at 后归档,弱更正(tier 2)只降权并从检索中隐藏"""
+    penalty = DEDUP_CONFIG["tier1_penalty"] if tier == 1 else DEDUP_CONFIG["tier2_penalty"]
+    target["score"] = target.get("score", target.get("importance", 0.5)) * penalty
+    target["override_tier"] = tier
+    target["conflict_downgraded"] = True
+    target["downgrade_reason"] = new_fact["id"]
+    target["downgrade_at"] = now_iso()
+    if tier == 1:
+        target["invalid_at"] = new_fact.get("created", now_iso())
+        target["superseded_by"] = new_fact["id"]
+    events.append(
+        {
+            "op": "INVALIDATE" if tier == 1 else "DOWNGRADE",
+            "id": target["id"],
+            "by": new_fact["id"],
+            "content": target["content"],
+            **(llm or {}),
+        }
+    )
+
+
+def _judge_candidates(new_fact, existing, store, operator, settings):
+    """挑选交给 LLM 判断的旧记忆:有语义向量时按语义相似度,否则按字面重叠率"""
+    pool = [r for r in existing if r is not new_fact and not r.get("invalid_at")]
+    if store:
+        scored = [(store.similarity(new_fact["content"], r["content"]), r) for r in pool]
+        min_score = settings["candidate_min_semantic"]
+    else:
+        scored = [(operator._calculate_similarity(new_fact["content"], r["content"]), r) for r in pool]
+        min_score = settings["candidate_min_literal"]
+    scored = sorted((x for x in scored if x[0] >= min_score), key=lambda x: x[0], reverse=True)
+    return [r for _, r in scored[: settings["max_candidates"]]]
 
 
 def _deduplicate_legacy(new_facts, existing_facts):
