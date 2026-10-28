@@ -5,6 +5,7 @@
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -24,9 +25,10 @@ def get_sessions_dir():
     return Path(sessions_dir)
 
 def get_memory_dir():
-    """获取记忆系统目录"""
-    workspace = get_workspace()
-    return workspace / 'memory'
+    """获取记忆系统目录(与 memory.py 一致:MEMORY_DIR 优先,其次 WORKSPACE/memory)"""
+    if os.environ.get('MEMORY_DIR'):
+        return Path(os.environ['MEMORY_DIR'])
+    return get_workspace() / 'memory'
 
 def load_pending(memory_dir):
     """加载现有 pending buffer"""
@@ -50,76 +52,100 @@ def save_pending(memory_dir, pending):
         for item in pending:
             f.write(json.dumps(item, ensure_ascii=False) + '\n')
 
+# 渠道消息(Telegram/飞书等)前面会包一层或多层元数据:
+#   Conversation info (untrusted metadata):
+#   ```json
+#   {...}
+#   ```
+#   [Sun 2026-03-01 10:00 GMT+8] 用户原话
+_ENVELOPE = re.compile(r'^\s*(Conversation info|Sender) \(untrusted metadata\):\s*```(?:json)?\s*.*?```\s*', re.S)
+_STAMP = re.compile(r'^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{4}-\d{2}-\d{2} \d{1,2}:\d{2}(?: GMT[+-]\d+)?\]\s*')
+# 不是用户本人说的话:系统事件、定时任务、心跳、压缩前记忆保存提示
+_NOT_USER = ('System:', '[cron:', 'Read HEARTBEAT.md', 'Pre-compaction memory flush')
+_ESCAPE = re.compile(r'\\(.)', re.S)
+
+
+def _fix_escape(match):
+    """合法转义原样保留;非法的(如脱敏后留下的反斜杠加 x)补一个反斜杠变成字面量"""
+    return match.group(0) if match.group(1) in '\\"/bfnrtu' else '\\\\' + match.group(1)
+
+
+def load_jsonl_lenient(line):
+    """解析一行 JSONL;脱敏工具留下的非法转义(如 \\x)会先修复再解析"""
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError:
+        return json.loads(_ESCAPE.sub(_fix_escape, line))
+
+
+def user_text(raw):
+    """
+    从一条 user 消息里取出用户原话
+
+    剥掉渠道元数据外壳和时间戳前缀;系统事件、定时任务等返回 None
+    """
+    text = raw.strip()
+    while True:
+        stripped = _ENVELOPE.sub('', text, count=1)
+        if stripped == text:
+            break
+        text = stripped
+    text = _STAMP.sub('', text).strip()
+    if not text or text.startswith(_NOT_USER):
+        return None
+    return text
+
+
 def extract_user_messages(session_file, hours=24):
-    """从对话文件提取用户消息"""
-    cutoff = datetime.now() - timedelta(hours=hours)
+    """从对话文件提取用户消息(hours=None 表示不按时间过滤)"""
+    cutoff = datetime.now() - timedelta(hours=hours) if hours else None
     messages = []
-    
+
     try:
         with open(session_file, 'r', encoding='utf-8') as f:
             for line in f:
                 if not line.strip():
                     continue
-                
                 try:
-                    entry = json.loads(line)
-                    
-                    # OpenClaw 格式: {"type":"message", "message":{"role":"user", ...}}
-                    if entry.get('type') != 'message':
-                        continue
-                    
-                    message = entry.get('message', {})
-                    if message.get('role') != 'user':
-                        continue
-                    
-                    # 检查时间
-                    timestamp_str = entry.get('timestamp')
-                    if timestamp_str:
-                        timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-                        if timestamp.replace(tzinfo=None) < cutoff:
-                            continue
-                    
-                    # 提取内容 (content 是数组格式)
-                    content_array = message.get('content', [])
-                    if not content_array:
-                        continue
-                    
-                    # 合并所有 text 类型的内容
-                    text_parts = []
-                    for item in content_array:
-                        if isinstance(item, dict) and item.get('type') == 'text':
-                            text_parts.append(item.get('text', ''))
-                    
-                    content = '\n'.join(text_parts).strip()
-                    
-                    # 过滤太短或无意义的消息
-                    if len(content) < 10:
-                        continue
-                    
-                    # 过滤系统消息和元数据
-                    if 'Conversation info (untrusted metadata)' in content:
-                        continue
-                    if content.startswith('Read HEARTBEAT.md'):
-                        continue
-                    if content.startswith('System:'):
-                        continue
-                    
-                    messages.append({
-                        'content': content,
-                        'timestamp': timestamp_str or datetime.now().isoformat() + 'Z',
-                        'session': session_file.stem
-                    })
-                    
+                    entry = load_jsonl_lenient(line)
                 except json.JSONDecodeError:
                     continue
-                except Exception as e:
-                    print(f"⚠️ 解析消息出错: {e}", file=sys.stderr)
+
+                # OpenClaw 格式: {"type":"message", "message":{"role":"user", ...}}
+                if entry.get('type') != 'message':
                     continue
-    
-    except Exception as e:
+                message = entry.get('message', {})
+                if message.get('role') != 'user':
+                    continue
+
+                timestamp_str = entry.get('timestamp')
+                if cutoff and timestamp_str:
+                    timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                    if timestamp.replace(tzinfo=None) < cutoff:
+                        continue
+
+                content = message.get('content', [])
+                if isinstance(content, str):
+                    raw = content
+                else:
+                    raw = '\n'.join(
+                        item.get('text', '') for item in content if isinstance(item, dict) and item.get('type') == 'text'
+                    )
+                text = user_text(raw)
+                # 太短的通常是"好的""嗯",交给 memory.py 的噪声过滤也行,这里先挡掉单字
+                if not text or len(text) < 2:
+                    continue
+
+                messages.append({
+                    'content': text,
+                    'timestamp': timestamp_str or datetime.now().isoformat() + 'Z',
+                    'session': session_file.stem
+                })
+    except OSError as e:
         print(f"⚠️ 读取文件出错 {session_file}: {e}", file=sys.stderr)
-    
+
     return messages
+
 
 def generate_id(content, timestamp):
     """生成记忆 ID"""

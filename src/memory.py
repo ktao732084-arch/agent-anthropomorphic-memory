@@ -640,10 +640,12 @@ def _parse_utc(ts):
 
 
 def archive_stale_memories(memory_dir):
-    """把已过期(expires_at 已过)或已失效(invalid_at 已设置)的记忆移入归档池
+    """把已失效(invalid_at 已设置)的记忆移入归档池;已过期的事件只标记 event_passed
 
+    事件过去之后人仍然记得它发生过("上周三面试过"),只是不再把它当待办,
+    所以过期不归档、仍可检索;记录里的日期让 Agent 知道它已经过去。
     不删除任何记录;每次移动写一条历史事件。
-    返回: 移动条数
+    返回: 移入归档池的条数
     """
     now = _parse_utc(now_iso())
     moved = 0
@@ -652,17 +654,19 @@ def archive_stale_memories(memory_dir):
         active_path = memory_dir / f"layer2/active/{mem_type}.jsonl"
         records = load_jsonl(active_path)
         keep, stale = [], []
+        newly_passed = 0
         for r in records:
             expires = _parse_utc(r.get("expires_at"))
             if r.get("invalid_at"):
                 r["archived_reason"] = "superseded"
                 stale.append(r)
-            elif expires and expires <= now:
-                r["archived_reason"] = "expired"
-                stale.append(r)
-            else:
-                keep.append(r)
-        if not stale:
+                continue
+            if expires and expires <= now and not r.get("event_passed"):
+                r["event_passed"] = True
+                newly_passed += 1
+                events.append({"op": "EVENT_PASSED", "id": r["id"], "content": r["content"]})
+            keep.append(r)
+        if not stale and not newly_passed:
             continue
         save_jsonl(active_path, keep)
         for r in stale:
@@ -687,7 +691,7 @@ def ground_record_time(record, category, observed_at=None):
     - content 中的 "下周三" 等标注为绝对日期
     - valid_at: 记忆开始成立的时间(观察时间)
     - event_date: 文中第一个精确到天的日期
-    - 未来事件且非永久类别: expires_at 设为事件次日,过期后移入归档
+    - 未来事件且非永久类别: expires_at 设为事件次日,过期后标记 event_passed(不归档)
     """
     observed_at = observed_at or record.get("created") or now_iso()
     observed = (_parse_utc(observed_at) or _utcnow()).date()
@@ -695,7 +699,8 @@ def ground_record_time(record, category, observed_at=None):
     record.setdefault("valid_at", observed_at)
     if event_date:
         record["event_date"] = event_date.isoformat()
-        if event_date >= observed and category not in PERMANENT_CATEGORIES and not record.get("expires_at"):
+        # 只有未来的安排才有"到期";当天/过去发生的事是经历,不是待办
+        if event_date > observed and category not in PERMANENT_CATEGORIES and not record.get("expires_at"):
             record["expires_at"] = f"{(event_date + timedelta(days=1)).isoformat()}T00:00:00Z"
             record["is_permanent"] = False
 
@@ -1013,6 +1018,10 @@ def extract_entities(content, memory_dir=None, use_llm_fallback=True):
     return final_entities
 
 
+# 记忆类型 → 存储文件名/字典键("summary" 的复数是 summaries,不能直接加 s)
+MEMORY_TYPE_PLURAL = {"fact": "facts", "belief": "beliefs", "summary": "summaries"}
+
+
 def classify_memory_type(content, importance):
     """
     判断记忆类型: fact / belief / summary
@@ -1124,7 +1133,7 @@ def template_extract(filtered_segments, use_llm_fallback=True, memory_dir=None):
             record["basis"] = f"从对话推断: {content[:50]}..."
 
         # 分类存储
-        extracted[f"{mem_type}s"].append(record)
+        extracted[MEMORY_TYPE_PLURAL[mem_type]].append(record)
 
     return extracted
 
@@ -3000,7 +3009,7 @@ def cmd_capture(args):
         else:
             append_jsonl(path, record)
     else:
-        path = memory_dir / f"layer2/active/{mem_type}s.jsonl"
+        path = memory_dir / f"layer2/active/{MEMORY_TYPE_PLURAL[mem_type]}.jsonl"
         append_jsonl(path, record)
         log_history(memory_dir, [{"op": "ADD", "id": record["id"], "content": record["content"]}])
 

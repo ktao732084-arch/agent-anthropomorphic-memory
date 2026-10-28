@@ -106,12 +106,12 @@ def main():
             "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8"
         )
         run(mem, "consolidate", "--force")
-        archived = load(mem / "layer2/archive/facts.jsonl")
+        active = load(mem / "layer2/active/facts.jsonl")
         total += 1
         passed += check(
-            "过期事件归档",
-            any(r.get("archived_reason") == "expired" and "考试" in r["content"] for r in archived),
-            f"{[(r['archived_reason'], r['content']) for r in archived]}",
+            "事件过去后仍记得，只标记 event_passed",
+            any(r.get("event_passed") and "考试" in r["content"] for r in active),
+            f"{[(r.get('event_passed'), r['content']) for r in active]}",
         )
 
     print("\n" + "=" * 60)
