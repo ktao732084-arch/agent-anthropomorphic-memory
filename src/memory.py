@@ -28,6 +28,8 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+from embeddings import VectorStore, cosine, get_embedder
+from embeddings import load_settings as load_embedding_settings
 from temporal import ground_relative_dates
 
 # 导入 v1.1 新增模块
@@ -1232,10 +1234,25 @@ def _deduplicate_with_operator(new_facts, existing_facts, events=None):
     """
     if events is None:
         events = []
+    # 语义向量(可选):带更正词但字面重叠太少时,用来找被更正的旧记忆
+    store = get_vector_store(get_memory_dir())
+    semantic_kwargs = {}
+    if store:
+        try:
+            store.ensure([f["content"] for f in existing_facts + new_facts])
+            store.save()
+            semantic_kwargs = {
+                "semantic_similarity": store.similarity,
+                "semantic_conflict_threshold": float(store.settings["correction_min_score"]),
+            }
+        except Exception as e:
+            print(f"⚠️ 语义向量不可用,仅用字面相似度: {e}", file=sys.stderr)
+
     operator = MemoryOperator(
         similarity_threshold=DEDUP_CONFIG["merge_overlap_ratio"],
         conflict_threshold=DEDUP_CONFIG["min_overlap_ratio"],
         override_signals=(OVERRIDE_SIGNALS_TIER1, OVERRIDE_SIGNALS_TIER2),
+        **semantic_kwargs,
     )
     merged = []
     duplicate_count = 0
@@ -2310,6 +2327,16 @@ def router_search(query, memory_dir=None, use_qmd=True, use_vector=True):
         if vector_results:
             vector_used = True
 
+    # 语义向量检索(可选,未配置时为空)
+    semantic_results = []
+    store = get_vector_store(memory_dir)
+    if store:
+        try:
+            semantic_results = semantic_search(query, memory_dir, store, config["initial"])
+            store.save()
+        except Exception as e:
+            print(f"⚠️ 语义检索失败,仅使用关键词检索: {e}", file=sys.stderr)
+
     # v1.5.2: TF-IDF 语义检索
     tfidf_results = []
     if TFIDF_ENABLED:
@@ -2338,7 +2365,9 @@ def router_search(query, memory_dir=None, use_qmd=True, use_vector=True):
 
     # v1.5.2: RRF 合并多路结果（pending 直接保留，其余走 RRF）
     if TFIDF_ENABLED and (tfidf_results or qmd_results or keyword_results or entity_results):
-        rrf_input = [l for l in [tfidf_results, qmd_results, keyword_results, entity_results, vector_results] if l]
+        rrf_input = [
+            l for l in [tfidf_results, qmd_results, keyword_results, entity_results, vector_results, semantic_results] if l
+        ]
         rrf_merged = rrf_merge(rrf_input, k=60, top_n=config["rerank"])
         # pending 优先，RRF 结果去重追加
         seen_ids = {r["id"] for r in pending_results}
@@ -2355,7 +2384,8 @@ def router_search(query, memory_dir=None, use_qmd=True, use_vector=True):
             if r["id"] not in seen_ids:
                 seen_ids.add(r["id"])
                 merged_results.append(r)
-        for r in vector_results + qmd_results + keyword_results + entity_results:
+        # 同一条记忆被多路命中时保留先出现的(关键词结果优先于语义结果)
+        for r in vector_results + qmd_results + keyword_results + entity_results + semantic_results:
             if r["id"] not in seen_ids:
                 seen_ids.add(r["id"])
                 merged_results.append(r)
@@ -2364,7 +2394,12 @@ def router_search(query, memory_dir=None, use_qmd=True, use_vector=True):
     corrected = _corrected_ids(memory_dir)
     merged_results = [r for r in merged_results if r.get("id") not in corrected]
 
-    reranked = rerank_results(merged_results, query, config["rerank"], memory_dir=memory_dir)
+    # 字面命中优先,语义结果只补在后面:避免"重要性高但不相关"的语义近邻排到精确命中前面
+    literal = [r for r in merged_results if r.get("match_source") != "semantic"]
+    semantic_only = [r for r in merged_results if r.get("match_source") == "semantic"]
+    reranked = rerank_results(literal, query, config["rerank"], memory_dir=memory_dir)
+    reranked += rerank_results(semantic_only, query, config["rerank"], memory_dir=memory_dir)
+    reranked = reranked[: config["rerank"]]
 
     # v1.5.0: Spreading Activation（ACT-R）
     # spread 记录单独保留 top-3，追加到 final 结果末尾
@@ -2482,6 +2517,47 @@ def _corrected_ids(memory_dir):
         for r in load_jsonl(memory_dir / f"layer2/active/{mem_type}.jsonl")
         if r.get("conflict_downgraded")
     }
+
+
+def get_vector_store(memory_dir):
+    """启用语义向量(见 src/embeddings.py)时返回 VectorStore,否则返回 None"""
+    settings = load_embedding_settings(get_config())
+    embedder = get_embedder(settings)
+    return VectorStore(memory_dir, embedder, settings) if embedder else None
+
+
+def semantic_search(query, memory_dir, store, limit=20):
+    """语义检索:按查询与记忆的余弦相似度返回结果(格式同 keyword_search)"""
+    records = list(_load_all_active_records(memory_dir).values())
+    store.ensure([r["content"] for r in records])
+    query_vec = store.embed_query(query)
+    min_score = float(store.settings["search_min_score"])
+
+    scored = []
+    for r in records:
+        vec = store.get(r["content"])
+        if vec is not None:
+            sim = cosine(query_vec, vec)
+            if sim >= min_score:
+                scored.append((sim, r))
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    return [
+        {
+            "id": r["id"],
+            "score": sim,
+            "content": r.get("content", ""),
+            "importance": r.get("importance", 0.5),
+            "memory_score": r.get("score", 0.5),
+            "type": r.get("type", "fact"),
+            "entities": r.get("entities", []),
+            "last_accessed": r.get("last_accessed"),
+            "is_identity": r.get("is_identity", False),
+            "confidence": r.get("confidence"),
+            "match_source": "semantic",
+        }
+        for sim, r in scored[:limit]
+    ]
 
 
 def _get_active_memory_count(memory_dir):
@@ -2735,6 +2811,16 @@ def cmd_status(args):
     print(f"   上次运行: {state.get('last_run', '从未')}")
     print(f"   上次成功: {state.get('last_success', '从未')}")
     print(f"   当前阶段: {state.get('current_phase', '无')}")
+    print()
+    settings = load_embedding_settings(get_config())
+    if settings["provider"] == "none":
+        print("🔎 语义检索: 未启用(仅关键词,见 src/embeddings.py)")
+    else:
+        store = get_vector_store(memory_dir)
+        if store:
+            print(f"🔎 语义检索: {store.embedder.model_id},已缓存 {len(store.vectors)} 条向量")
+        else:
+            print(f"🔎 语义检索: 已配置 {settings['provider']} 但不可用,仅关键词")
 
 
 def cmd_stats(args):
@@ -2978,6 +3064,17 @@ def rebuild_index(memory_dir):
         json.dump(keywords_index, f, indent=2, ensure_ascii=False)
     with open(memory_dir / "layer2/index/relations.json", "w", encoding="utf-8") as f:
         json.dump(relations_index, f, indent=2, ensure_ascii=False)
+
+    # 语义向量(可选):只为新增或改写的记忆计算
+    store = get_vector_store(memory_dir)
+    if store:
+        contents = [r.get("content", "") for r in _load_all_active_records(memory_dir).values()]
+        try:
+            store.prune(contents)
+            store.ensure(contents)
+            store.save()
+        except Exception as e:
+            print(f"⚠️ 语义向量更新失败,下次再试: {e}", file=sys.stderr)
 
 
 def cmd_consolidate(args):

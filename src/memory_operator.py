@@ -7,7 +7,7 @@ Memory System v1.3.0 - Memory Operator
 import re
 import json
 from difflib import SequenceMatcher
-from typing import List, Dict, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from pathlib import Path
 
 
@@ -63,6 +63,8 @@ class MemoryOperator:
         conflict_threshold: float = 0.3,
         backend=None,
         override_signals: Optional[Tuple[List[str], List[str]]] = None,
+        semantic_similarity: Optional[Callable[[str, str], float]] = None,
+        semantic_conflict_threshold: float = 0.6,
     ):
         """
         初始化
@@ -73,10 +75,15 @@ class MemoryOperator:
             conflict_threshold: 带修正信号时，重叠率达到此值视为在修正旧记忆
             backend: SQLite 后端（用于冲突解决）
             override_signals: (tier1, tier2) 修正信号列表，默认用类常量
+            semantic_similarity: 可选的语义相似度函数 (text1, text2) -> [0, 1]；
+                带修正信号但字面重叠不足时，用它找被修正的旧记忆（不用于合并判断）
+            semantic_conflict_threshold: 语义相似度达到此值视为在修正这条旧记忆
         """
         self.llm_client = llm_client
         self.similarity_threshold = similarity_threshold
         self.conflict_threshold = conflict_threshold
+        self.semantic_similarity = semantic_similarity
+        self.semantic_conflict_threshold = semantic_conflict_threshold
         self.backend = backend
         if override_signals:
             self.override_tier1, self.override_tier2 = override_signals
@@ -152,10 +159,14 @@ class MemoryOperator:
         
         # 2.2 带修正信号且说的是同一件事 → 降权旧记忆，保留新记忆
         tier = self._override_tier(new_memory['content'])
-        if tier and target is not None and similarity >= self.conflict_threshold:
-            self.last_override_tier = tier
-            self.stats['delete'] += 1
-            return ('DELETE', target)
+        if tier:
+            corrected = target if (target is not None and similarity >= self.conflict_threshold) else None
+            if corrected is None:
+                corrected = self._find_semantic_match(new_memory, existing_memories)
+            if corrected is not None:
+                self.last_override_tier = tier
+                self.stats['delete'] += 1
+                return ('DELETE', corrected)
         
         # 2.3 无修正信号、高度相似、且不是换词（张三→李四、花生→花粉是不同的事实）→ 合并
         if (
@@ -211,6 +222,17 @@ class MemoryOperator:
                 best, best_sim = old, sim
         
         return best, best_sim
+    
+    def _find_semantic_match(self, new_memory: Dict, existing_memories: List[Dict]) -> Optional[Dict]:
+        """用语义相似度找最可能被修正的旧记忆；未配置或都不够相似时返回 None"""
+        if not self.semantic_similarity:
+            return None
+        best, best_sim = None, 0.0
+        for old in existing_memories:
+            sim = self.semantic_similarity(new_memory['content'], old['content'])
+            if sim > best_sim:
+                best, best_sim = old, sim
+        return best if best_sim >= self.semantic_conflict_threshold else None
     
     def _calculate_similarity(self, text1: str, text2: str) -> float:
         """

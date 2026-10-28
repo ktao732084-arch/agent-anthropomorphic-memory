@@ -101,4 +101,24 @@ skill 写入；回答涉及过去的问题前先用它检索。"
 可选：设置 `OPENAI_API_KEY` 后，规则拿不准的内容会调用 LLM 兜底（见
 [架构说明](references/architecture.md) 的 LLM 配置一节）。不设置则全部走规则。
 
+### 可选：语义检索
+
+默认只按关键词检索，查"宠物"找不到"我养了一只橘猫"。配置 embedding 后，换个说法也能查到：
+
+```bash
+# 任何 OpenAI 兼容的 /embeddings 接口（OpenAI、硅基流动、Ollama、LM Studio 等），零依赖
+export MEMORY_EMBEDDING_PROVIDER=openai
+export MEMORY_EMBEDDING_BASE_URL=https://api.openai.com/v1   # 换成你的服务地址
+export MEMORY_EMBEDDING_MODEL=text-embedding-3-small
+export MEMORY_EMBEDDING_API_KEY=...
+
+# 或本地 ONNX 模型（目录内含 model.onnx 和 tokenizer.json），需 pip install onnxruntime tokenizers numpy
+export MEMORY_EMBEDDING_PROVIDER=onnx
+export MEMORY_EMBEDDING_MODEL_DIR=/path/to/bge-small-zh-v1.5
+export MEMORY_EMBEDDING_QUERY_PREFIX="为这个句子生成表示以用于检索相关文章："
+```
+
+用 `status` 查看是否生效。向量缓存在 `memory/layer2/index/embeddings.json`，每条记忆只算一次；
+服务不可用时自动退回关键词检索。语义相似度只用于检索和匹配更正，不会据此合并记忆。
+
 架构、评分公式、衰减参数见 [references/architecture.md](references/architecture.md)。
