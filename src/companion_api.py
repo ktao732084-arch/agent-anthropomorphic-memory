@@ -25,7 +25,7 @@ import tempfile
 import threading
 
 PROTOCOL = 1
-ENGINE_REVISION = 'f5451f1ffe9c9de84f7db7c62d8bd01012c31bd4'
+ENGINE_REVISION = '9862c930b367bbb0b5fa4b2c751914604cd0b548'
 MAX_BYTES = 3 * 1024 * 1024
 MAX_ACTIVE, MAX_ARCHIVE, MAX_AUDIT = 120, 240, 512
 ENGINE_FIELDS = ('content', 'created', 'importance', 'score', 'entities', 'valid_at',

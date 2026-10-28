@@ -145,12 +145,14 @@ class CompanionTests(unittest.TestCase):
     def test_reasoning_and_truncated_answers_cannot_invalidate(self):
         import io
         from llm_judge import LLMJudge
-        settings = dict(base_url='https://example.invalid/v1', model='test', api_key='test')
+        settings = dict(base_url='https://example.invalid/v1', model='test', api_key='test', max_tokens=2048)
         judge = LLMJudge(settings)
         for choice in [dict(message={'reasoning_content': '{"decision":"SUPERSEDE","targets":[1]}'}),
                        dict(message={'content': '{"decision":"SUPERSEDE","targets":[1]}'}, finish_reason='length')]:
-            with patch('llm_judge.urllib.request.urlopen', return_value=io.BytesIO(json.dumps({'choices': [choice]}).encode())):
+            with patch('llm_judge.urllib.request.urlopen', return_value=io.BytesIO(json.dumps({'choices': [choice]}).encode())) as transport:
                 self.assertIsNone(judge.judge({'content': '我喜欢蓝色'}, [{'content': '我喜欢红色'}]))
+                transport.assert_called_once()
+                self.assertEqual(2048, json.loads(transport.call_args.args[0].data)['max_tokens'])
     def test_llm_supersede_through_protocol(self):
         from test_llm_judge import FakeChatServer
         server = FakeChatServer()

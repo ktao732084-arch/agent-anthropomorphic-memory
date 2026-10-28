@@ -40,3 +40,5 @@ python -X utf8 eval/run_companion_eval.py --json companion-results.json
 评测复用 `eval/cases` 的 84 个场景，不修改预期。规则模式仍是 145/166，隐含变化、同义表达等限制继续公开保留。Android 通过真实 HTTP 重放同一批场景，验证协议与引擎行为一致；真实云模型质量、真实 ONNX 权重和手机整机体验需另测。
 
 集成同时收紧 `llm_judge`：编号不接受布尔值、浮点数或字符串冒充数组；截断响应和 `reasoning_content` 不能触发旧事实失效。字符串形式的整数编号仍兼容。
+
+已合入上游 `9862c93` 的思考模型 token 预算修复：`MEMORY_LLM_JUDGE_MAX_TOKENS` 默认 2048。该上游提交报告语义检索 + DeepSeek 模型达到 164/166；本次跨端联调仅独立复测规则模式和受控模型接口，不把上游报告记作 Android 真机或本次真实模型实测。
