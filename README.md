@@ -55,6 +55,7 @@ legacy/                      # v1.1.x 时代模块（实体系统、LLM 集成�
 SKILL.md                     # Agent 使用说明（何时写、何时查、怎么用结果）
 references/architecture.md   # 架构与机制详解
 docs/ROADMAP-agent-skill.md  # 对标 mem0 / Graphiti / claude-mem / OpenClaw 的优化路线
+eval/                        # 中文记忆评测集（84 个用例，python3 eval/run_eval.py）
 ```
 
 > **如实说明**：v1.4.0+ 迭代中在作者本机开发的部分模块（temporal_engine、

@@ -531,7 +531,14 @@ LLM_STATS = {"phase2_calls": 0, "phase3_calls": 0, "total_tokens": 0, "errors": 
 
 
 def _utcnow():
-    """当前 UTC 时间(naive),替代已弃用的 datetime.utcnow()"""
+    """当前 UTC 时间(naive),替代已弃用的 datetime.utcnow()
+
+    设置环境变量 MEMORY_NOW(ISO 时间,如 2026-03-01T10:00:00Z)可固定"现在",
+    用于评测回放跨天对话和可复现测试。
+    """
+    fixed = os.environ.get("MEMORY_NOW")
+    if fixed:
+        return datetime.fromisoformat(fixed.replace("Z", "+00:00")).replace(tzinfo=None)
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
@@ -589,7 +596,7 @@ def save_jsonl(path, records):
 
 def generate_id(prefix, content):
     """生成唯一ID"""
-    date_str = datetime.now().strftime("%Y%m%d")
+    date_str = _utcnow().strftime("%Y%m%d")
     hash_str = hashlib.md5(content.encode()).hexdigest()[:6]
     return f"{prefix}_{date_str}_{hash_str}"
 
@@ -2948,7 +2955,7 @@ def cmd_consolidate(args):
 
     if not args.force and state.get("last_success"):
         last_success = datetime.fromisoformat(state["last_success"].replace("Z", "+00:00"))
-        hours_since = (datetime.now(last_success.tzinfo) - last_success).total_seconds() / 3600
+        hours_since = (_utcnow() - last_success.replace(tzinfo=None)).total_seconds() / 3600
         fallback_hours = config["consolidation"]["fallback_hours"]
 
         if hours_since < 20:  # 至少间隔 20 小时
@@ -3269,7 +3276,7 @@ def cmd_consolidate(args):
             print("\n🔍 Phase 6.9: 过时扫描")
 
             stale_days = config.get("memory", {}).get("stale_days", 30)  # 默认 30 天
-            now = datetime.now()
+            now = _utcnow()
             stale_count = 0
             updated_verified = 0
 
@@ -3756,7 +3763,7 @@ def add_to_pending(memory_dir, content: str, source: str = "user") -> dict:
     is_urgent, importance, category = check_urgency(content)
 
     record = {
-        "id": f"p_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:6]}",
+        "id": f"p_{_utcnow().strftime('%Y%m%d')}_{uuid.uuid4().hex[:6]}",
         "content": content,
         "source": source,
         "created": now_iso(),
@@ -3834,7 +3841,7 @@ def cmd_health_index(args):
             all_memories.append(r)
 
     # 统计
-    now = datetime.now()
+    now = _utcnow()
     stats = {
         "total": len(all_memories),
         "active": 0,
@@ -4040,7 +4047,7 @@ def cmd_mini_consolidate(args):
 
         # 构建新记录
         new_record = {
-            "id": f"f_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:6]}",
+            "id": f"f_{_utcnow().strftime('%Y%m%d')}_{uuid.uuid4().hex[:6]}",
             "content": content,
             "type": "fact",
             "category": record.get("category", "general"),
