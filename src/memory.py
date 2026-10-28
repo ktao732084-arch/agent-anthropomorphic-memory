@@ -25,8 +25,10 @@ import re
 import subprocess
 import sys
 import uuid
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+
+from temporal import ground_relative_dates
 
 # 导入 v1.1 新增模块
 try:
@@ -37,7 +39,8 @@ try:
     V1_1_ENABLED = True
 except ImportError:
     V1_1_ENABLED = False
-    print("⚠️ v1.1 模块未找到,部分功能不可用")
+    if os.environ.get("MEMORY_DEBUG"):
+        print("⚠️ v1.1 模块未找到,部分功能不可用", file=sys.stderr)
 
 # 导入 v1.1.5 实体系统模块(用于实体隔离和学习实体清理)
 try:
@@ -527,6 +530,11 @@ LLM_STATS = {"phase2_calls": 0, "phase3_calls": 0, "total_tokens": 0, "errors": 
 # ============================================================
 
 
+def _utcnow():
+    """当前 UTC 时间(naive),替代已弃用的 datetime.utcnow()"""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 def get_memory_dir():
     """获取记忆系统根目录
 
@@ -588,7 +596,7 @@ def generate_id(prefix, content):
 
 def now_iso():
     """当前时间 ISO 格式"""
-    return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    return _utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def append_jsonl(path, record):
@@ -596,6 +604,81 @@ def append_jsonl(path, record):
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def log_history(memory_dir, events):
+    """追加操作历史到 layer2/history.jsonl(借鉴 mem0 的 history 表,用于审计和回滚)"""
+    ts = now_iso()
+    for event in events:
+        append_jsonl(memory_dir / "layer2/history.jsonl", {"ts": ts, **event})
+
+
+def _parse_utc(ts):
+    """解析 ISO 时间戳为 naive UTC datetime,失败返回 None"""
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).replace(tzinfo=None)
+    except (ValueError, TypeError):
+        return None
+
+
+def archive_stale_memories(memory_dir):
+    """把已过期(expires_at 已过)或已失效(invalid_at 已设置)的记忆移入归档池
+
+    不删除任何记录;每次移动写一条历史事件。
+    返回: 移动条数
+    """
+    now = _parse_utc(now_iso())
+    moved = 0
+    events = []
+    for mem_type in ["facts", "beliefs", "summaries"]:
+        active_path = memory_dir / f"layer2/active/{mem_type}.jsonl"
+        records = load_jsonl(active_path)
+        keep, stale = [], []
+        for r in records:
+            expires = _parse_utc(r.get("expires_at"))
+            if r.get("invalid_at"):
+                r["archived_reason"] = "superseded"
+                stale.append(r)
+            elif expires and expires <= now:
+                r["archived_reason"] = "expired"
+                stale.append(r)
+            else:
+                keep.append(r)
+        if not stale:
+            continue
+        save_jsonl(active_path, keep)
+        for r in stale:
+            r["archived_at"] = now_iso()
+            append_jsonl(memory_dir / f"layer2/archive/{mem_type}.jsonl", r)
+            events.append({"op": "ARCHIVE", "id": r["id"], "reason": r["archived_reason"], "content": r["content"]})
+        moved += len(stale)
+    log_history(memory_dir, events)
+    return moved
+
+
+# 这些类别的记忆不会因为提到了某个日期就过期
+PERMANENT_CATEGORIES = {"identity_health_safety", "preference_relation_status"}
+
+
+def ground_record_time(record, category, observed_at=None):
+    """把相对时间换算成绝对日期(原地修改 record)
+
+    - content 中的 "下周三" 等标注为绝对日期
+    - valid_at: 记忆开始成立的时间(观察时间)
+    - event_date: 文中第一个精确到天的日期
+    - 未来事件且非永久类别: expires_at 设为事件次日,过期后移入归档
+    """
+    observed_at = observed_at or record.get("created") or now_iso()
+    observed = (_parse_utc(observed_at) or _utcnow()).date()
+    record["content"], event_date = ground_relative_dates(record["content"], observed)
+    record.setdefault("valid_at", observed_at)
+    if event_date:
+        record["event_date"] = event_date.isoformat()
+        if event_date >= observed and category not in PERMANENT_CATEGORIES and not record.get("expires_at"):
+            record["expires_at"] = f"{(event_date + timedelta(days=1)).isoformat()}T00:00:00Z"
+            record["is_permanent"] = False
 
 
 # ============================================================
@@ -1004,6 +1087,9 @@ def template_extract(filtered_segments, use_llm_fallback=True, memory_dir=None):
                 record["expires_at"] = llm_result.get("expires_at")
                 record["is_permanent"] = llm_result.get("is_permanent", True)
 
+        # 相对时间 → 绝对日期(不覆盖上面已设置的 expires_at)
+        ground_record_time(record, content_category, segment.get("created"))
+
         # belief 需要额外字段
         if mem_type == "belief":
             record["confidence"] = 0.6
@@ -1092,7 +1178,7 @@ def tokenize_chinese(text):
     return tokens
 
 
-def deduplicate_facts(new_facts, existing_facts):
+def deduplicate_facts(new_facts, existing_facts, events=None):
     """
     Phase-4A - Facts dedup + conflict detection
     v1.3.0: 优先使用 MemoryOperator + ConflictResolver,降级回原有规则
@@ -1102,19 +1188,25 @@ def deduplicate_facts(new_facts, existing_facts):
     # v1.3.0: 优先用 MemoryOperator
     if HALLUCINATION_DEFENSE_ENABLED:
         try:
-            return _deduplicate_with_operator(new_facts, existing_facts)
+            return _deduplicate_with_operator(new_facts, existing_facts, events)
         except Exception as e:
             print(f"⚠️ MemoryOperator 去重失败,降级到旧版规则: {e}", file=sys.stderr)
 
     return _deduplicate_legacy(new_facts, existing_facts)
 
 
-def _deduplicate_with_operator(new_facts, existing_facts):
+def _deduplicate_with_operator(new_facts, existing_facts, events=None):
     """v1.3.0: 使用 MemoryOperator + ConflictResolver 去重
 
     existing_facts 中被合并/降权的记录会被原地修改,调用方需要回写。
     同一批新 facts 之间也会互相去重。
+    events 不为 None 时,每个决策追加一条历史事件(见 log_history)。
+
+    强修正(Tier 1)不删除旧记忆,而是写入 invalid_at / superseded_by
+    (借鉴 Graphiti 的时间失效),由 archive_stale_memories 移入归档池保留历史。
     """
+    if events is None:
+        events = []
     operator = MemoryOperator(
         similarity_threshold=DEDUP_CONFIG["merge_overlap_ratio"],
         conflict_threshold=DEDUP_CONFIG["min_overlap_ratio"],
@@ -1131,13 +1223,24 @@ def _deduplicate_with_operator(new_facts, existing_facts):
 
         if operation == "NOOP":
             duplicate_count += 1
+            events.append({"op": "NOOP", "id": new_fact["id"], "content": new_fact["content"]})
 
         elif operation == "ADD":
             merged.append(new_fact)
+            events.append({"op": "ADD", "id": new_fact["id"], "content": new_fact["content"]})
 
         elif operation == "UPDATE" and target:
             resolution = resolver.resolve(new_fact, target)
             if resolution["action"] == "UPDATE":
+                events.append(
+                    {
+                        "op": "MERGE",
+                        "id": target["id"],
+                        "from": new_fact["id"],
+                        "old_content": target["content"],
+                        "content": new_fact["content"],
+                    }
+                )
                 # 用新记忆内容更新旧记忆
                 target["content"] = new_fact["content"]
                 target["importance"] = new_fact.get("importance", target["importance"])
@@ -1155,8 +1258,20 @@ def _deduplicate_with_operator(new_facts, existing_facts):
             target["conflict_downgraded"] = True
             target["downgrade_reason"] = new_fact["id"]
             target["downgrade_at"] = now_iso()
+            if tier == 1:
+                target["invalid_at"] = new_fact.get("created", now_iso())
+                target["superseded_by"] = new_fact["id"]
             merged.append(new_fact)
             downgraded_count += 1
+            events.append(
+                {
+                    "op": "INVALIDATE" if tier == 1 else "DOWNGRADE",
+                    "id": target["id"],
+                    "by": new_fact["id"],
+                    "content": target["content"],
+                }
+            )
+            events.append({"op": "ADD", "id": new_fact["id"], "content": new_fact["content"]})
 
     return merged, duplicate_count, downgraded_count
 
@@ -1300,7 +1415,7 @@ def generate_summaries(facts, existing_summaries, trigger_count=3):
     返回: 新生成的 summaries 列表（不含已有摘要）
     """
     new_summaries = []
-    now = datetime.utcnow()
+    now = _utcnow()
 
     # 按实体分组 facts
     facts_by_entity = {}
@@ -1498,7 +1613,7 @@ def get_cached_result(query):
     # 原有内存缓存兜底
     if key in _session_cache:
         entry = _session_cache[key]
-        if datetime.utcnow().timestamp() - entry["time"] < _cache_ttl:
+        if _utcnow().timestamp() - entry["time"] < _cache_ttl:
             return entry["result"]
         else:
             del _session_cache[key]
@@ -1516,7 +1631,7 @@ def set_cached_result(query, result):
             pass  # 降级到内存缓存
 
     # 原有内存缓存兜底
-    _session_cache[key] = {"time": datetime.utcnow().timestamp(), "result": result}
+    _session_cache[key] = {"time": _utcnow().timestamp(), "result": result}
 
 
 def detect_trigger_layer(query):
@@ -1627,6 +1742,7 @@ def keyword_search(query, memory_dir, limit=20):
                     "entities": mem.get("entities", []),
                     "last_accessed": mem.get("last_accessed"),
                     "is_identity": mem.get("is_identity", False),
+                    "confidence": mem.get("confidence"),
                 }
             )
 
@@ -1702,7 +1818,7 @@ def rerank_results(results, query, limit, memory_dir=None):
     """
     import math
 
-    now = datetime.utcnow()
+    now = _utcnow()
 
     # 1. 计算三维综合分数（v1.5.0）
     for r in results:
@@ -2377,6 +2493,29 @@ def cmd_search(args):
     query = args.query
     result = router_search(query, memory_dir)
 
+    if args.json:
+        # 给 Agent 的精简索引:先看摘要和 ID,需要细节再用 get 取全文
+        print(
+            json.dumps(
+                {
+                    "query": query,
+                    "results": [
+                        {
+                            "id": r["id"],
+                            "type": r["type"],
+                            "content": r["content"][:120],
+                            "score": round(r.get("final_score", 0), 3),
+                            "importance": r.get("importance"),
+                            "confidence": r.get("confidence"),
+                        }
+                        for r in result["results"][: args.limit]
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        )
+        return
+
     print(f"🔍 检索: {query}")
     print("=" * 50)
     print(f"触发层级: Layer {result['trigger_layer']} ({result['trigger_type']})")
@@ -2406,10 +2545,18 @@ def cmd_search(args):
     print(f"   带标记注入: {len(inj['marked'])} 条")
     print(f"   仅引用: {len(inj['reference'])} 条")
 
-    if args.json:
-        print()
-        print("📄 JSON 输出:")
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+
+def cmd_get(args):
+    """按 ID 取记忆全文(含归档池),输出 JSON"""
+    memory_dir = get_memory_dir()
+    found = {}
+    for pool in ["active", "archive"]:
+        for mem_type in ["facts", "beliefs", "summaries"]:
+            for r in load_jsonl(memory_dir / f"layer2/{pool}/{mem_type}.jsonl"):
+                if r["id"] in args.ids and r["id"] not in found:
+                    found[r["id"]] = {**r, "type": mem_type.rstrip("s"), "pool": pool}
+    missing = [i for i in args.ids if i not in found]
+    print(json.dumps({"memories": [found[i] for i in args.ids if i in found], "missing": missing}, ensure_ascii=False))
 
 
 # ============================================================
@@ -2626,8 +2773,9 @@ def cmd_capture(args):
         return
 
     # 未指定 importance 时按规则计算(与 consolidate Phase 2 一致)
+    auto_importance, category = calculate_importance(content)
     if importance is None:
-        importance, _ = calculate_importance(content)
+        importance = auto_importance
     # 限制 importance 在 0-1 范围
     elif importance < 0:
         importance = 0
@@ -2650,11 +2798,16 @@ def cmd_capture(args):
     if mem_type == "belief":
         record["confidence"] = args.confidence
 
+    ground_record_time(record, category)
+    content = record["content"]
+
     if mem_type == "fact":
         # facts 与 consolidate Phase 4a 走同一套去重/冲突检测
         path = memory_dir / "layer2/active/facts.jsonl"
         existing_facts = load_jsonl(path)
-        merged, dup_count, downgrade_count = deduplicate_facts([record], existing_facts)
+        events = []
+        merged, dup_count, downgrade_count = deduplicate_facts([record], existing_facts, events)
+        log_history(memory_dir, events)
         if not merged:
             # 旧记忆可能已被新内容更新,回写后重建索引
             save_jsonl(path, existing_facts)
@@ -2663,12 +2816,14 @@ def cmd_capture(args):
             return
         if downgrade_count:
             save_jsonl(path, existing_facts + merged)
+            archive_stale_memories(memory_dir)
             print(f"⚠️ 检测到修正,已降权 {downgrade_count} 条旧记忆")
         else:
             append_jsonl(path, record)
     else:
         path = memory_dir / f"layer2/active/{mem_type}s.jsonl"
         append_jsonl(path, record)
+        log_history(memory_dir, [{"op": "ADD", "id": record["id"], "content": record["content"]}])
 
     # 立即更新索引,不必等下一次 consolidate 才能检索到
     rebuild_index(memory_dir)
@@ -2814,11 +2969,11 @@ def cmd_consolidate(args):
         # 用于存储中间结果
         phase_data = state.get("phase_data", {})
 
-        # Phase 0: 清理过期记忆(v1.1.4 新增)
-        if V1_1_ENABLED and (not args.phase or args.phase == 0):
+        # Phase 0: 过期/已失效记忆移入归档池
+        if not args.phase or args.phase == 0:
             print("\n🗑️ Phase 0: 清理过期记忆")
-            expired_count = phase0_expire_memories(memory_dir)
-            print(f"   归档 {expired_count} 条过期记忆")
+            expired_count = archive_stale_memories(memory_dir)
+            print(f"   归档 {expired_count} 条过期/失效记忆")
             print("   ✅ 完成")
 
         # Phase 1: 轻量全量(切分片段)
@@ -2901,7 +3056,8 @@ def cmd_consolidate(args):
             print("   4a: Facts 去重合并 + 冲突检测")
             new_facts = extracted.get("facts", [])
             if new_facts:
-                merged_facts, dup_count, downgrade_count = deduplicate_facts(new_facts, existing_facts)
+                events = []
+                merged_facts, dup_count, downgrade_count = deduplicate_facts(new_facts, existing_facts, events)
                 print(f"       新增: {len(merged_facts)}, 去重: {dup_count}, 降权: {downgrade_count}")
                 if dup_count or downgrade_count:
                     # 旧 facts 被原地合并/降权,与新 facts 一起整体重写
@@ -2909,6 +3065,9 @@ def cmd_consolidate(args):
                 else:
                     for fact in merged_facts:
                         append_jsonl(memory_dir / "layer2/active/facts.jsonl", fact)
+                log_history(memory_dir, events)
+                if downgrade_count:
+                    archive_stale_memories(memory_dir)
             else:
                 print("       [跳过] 无新 facts")
 
@@ -2998,7 +3157,7 @@ def cmd_consolidate(args):
             import math as _math
 
             archived_count = 0
-            _now_dt = datetime.utcnow()
+            _now_dt = _utcnow()
 
             def _parse_ts(ts):
                 if not ts:
@@ -3281,6 +3440,8 @@ def cmd_consolidate(args):
             save_soul_history(soul_report, memory_dir)
             print_soul_report(soul_report)
             print_soul_trend(memory_dir)
+        except ImportError:
+            pass  # soul_health 未随仓库开源,缺失时静默跳过
         except Exception as e:
             print(f"\n⚠️  Soul Health 计算失败: {e}")
 
@@ -4440,8 +4601,14 @@ def main():
     # search
     parser_search = subparsers.add_parser("search", help="智能检索记忆")
     parser_search.add_argument("query", help="检索查询")
-    parser_search.add_argument("--json", action="store_true", help="输出 JSON 格式")
+    parser_search.add_argument("--json", action="store_true", help="只输出精简 JSON(供 Agent 解析)")
+    parser_search.add_argument("--limit", type=int, default=8, help="--json 模式下返回条数")
     parser_search.set_defaults(func=cmd_search)
+
+    # get
+    parser_get = subparsers.add_parser("get", help="按 ID 取记忆全文(JSON)")
+    parser_get.add_argument("ids", nargs="+", help="记忆 ID")
+    parser_get.set_defaults(func=cmd_get)
 
     # v1.1.4 新增命令
     if V1_1_ENABLED:

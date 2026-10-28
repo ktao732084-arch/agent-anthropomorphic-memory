@@ -9,6 +9,8 @@ python3 tests/test_v1_1_6.py
 python3 tests/test_v1_1_7.py
 python3 tests/test_concurrent.py
 python3 tests/test_dedup_regression.py
+python3 tests/test_agent_features.py
+python3 src/temporal.py        # 相对时间换算自测
 ```
 
 ## 当前状态（2026-10）
@@ -21,6 +23,7 @@ python3 tests/test_dedup_regression.py
 | test_v1_1_7.py | legacy/v1_1_7_llm_integration（语义复杂度、LLM 兜底） | ✅ 29/29 |
 | test_concurrent.py | legacy/sqlite_backend_v1_2_5（线程安全） | ✅ 全部通过 |
 | test_dedup_regression.py | src/memory.py + memory_operator（无实体修正、完全重复、同批次去重、误合并） | ✅ 5/5 |
+| test_agent_features.py | CLI 端到端（时间落地、更正失效归档、history、search --json、get、过期归档） | ✅ 6/6 |
 
 ## 已修复的回归（2026-10）
 
