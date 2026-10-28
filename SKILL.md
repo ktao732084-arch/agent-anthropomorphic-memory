@@ -129,8 +129,8 @@ export MEMORY_EMBEDDING_QUERY_PREFIX="为这个句子生成表示以用于检索
 ```bash
 export MEMORY_LLM_JUDGE=on
 export OPENAI_API_KEY=...                       # 任何 OpenAI 兼容的 /chat/completions 接口
-export OPENAI_BASE_URL=https://api.openai.com/v1
-export MEMORY_LLM_JUDGE_MODEL=gpt-4o-mini       # 可选
+export OPENAI_BASE_URL=https://api.deepseek.com # 例：DeepSeek
+export MEMORY_LLM_JUDGE_MODEL=deepseek-flash    # DeepSeek-V4.1-Flash，评测 99%（配合语义检索）
 ```
 
 只在规则判为"新增"、且存在相关旧记忆时调用（每条新记忆最多一次）；判为"取代"的旧记忆归档而非删除，
