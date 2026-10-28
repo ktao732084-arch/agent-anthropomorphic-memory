@@ -58,6 +58,8 @@ def load_settings() -> Dict:
         "base_url": os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
         "model": os.environ.get("MEMORY_LLM_JUDGE_MODEL") or os.environ.get("MEMORY_LLM_MODEL") or "gpt-4o-mini",
         "max_candidates": int(os.environ.get("MEMORY_LLM_JUDGE_CANDIDATES", "5")),
+        # 思考类模型（如 deepseek-v4-pro）会先输出推理过程，上限太小时答案会被截断
+        "max_tokens": int(os.environ.get("MEMORY_LLM_JUDGE_MAX_TOKENS", "2048")),
         # 有语义向量时，候选旧记忆的最低语义相似度
         "candidate_min_semantic": float(os.environ.get("MEMORY_LLM_JUDGE_MIN_SEMANTIC", "0.5")),
         # 没有语义向量时，候选旧记忆的最低字面重叠率。由 LLM 做最终判断，宁可多给候选：
@@ -110,7 +112,12 @@ class LLMJudge:
 
     def _chat(self, messages: List[Dict]) -> str:
         body = json.dumps(
-            {"model": self.settings["model"], "messages": messages, "temperature": 0, "max_tokens": 300}
+            {
+                "model": self.settings["model"],
+                "messages": messages,
+                "temperature": 0,
+                "max_tokens": self.settings["max_tokens"],
+            }
         ).encode("utf-8")
         req = urllib.request.Request(
             self.settings["base_url"].rstrip("/") + "/chat/completions",
