@@ -1,5 +1,7 @@
 # Memory System — AI Agent 持久化记忆系统
 
+手机直接运行：核心记忆流程已移植为 Android 原生实现，内置于 [大肥鱼 0.4.0](https://github.com/ktao732084-arch/dafeiyu-android/tree/v0.4.0)，默认无需电脑或 Python 服务。规则、时间解析与状态操作在手机执行，模型辅助复用手机已有模型配置；详见 [安卓原生移植说明](docs/ANDROID-NATIVE.md)。
+
 新增 Android 联调入口：[`src/companion_api.py`](src/companion_api.py)。与大肥鱼共用真实记忆引擎和 84 个中文评测场景，运行方法与协议见 [ANDROID-COMPANION.md](docs/ANDROID-COMPANION.md)。
 
 > 一个受神经科学启发的 AI Agent 记忆系统，支持三层存储、关键词+实体检索（可选 QMD/BM25 增强）、时间驱动的指数衰减和 7 阶段记忆整合。

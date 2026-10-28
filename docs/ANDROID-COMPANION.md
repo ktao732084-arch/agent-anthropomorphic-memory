@@ -1,5 +1,7 @@
 # Android 大肥鱼接入
 
+**0.4.0起，手机默认使用APK内的原生记忆引擎，无需本服务。** 本页是可选Python开发对照说明；手机直接运行版本见 [ANDROID-NATIVE.md](ANDROID-NATIVE.md)。
+
 新增 `src/companion_api.py` 将现有记忆引擎暴露为带令牌的快照处理接口；不依赖 DSH，也不改变原有 CLI 的使用方式。
 
 Android 客户端与完整运行说明位于 [dafeiyu-android/memory-service](https://github.com/ktao732084-arch/dafeiyu-android/tree/main/memory-service)。手机保存主副本，服务不将其写入你原有的个人记忆目录。适配器调用本项目的噪声过滤、重要性、时间落地、去重/更正、历史归档、索引、检索、可选 embeddings 和 LLM 写入判断；不将模型生成的猜测转为用户事实，不启用旧版可选的任意提取器、QMD 命令或宿主调度。
