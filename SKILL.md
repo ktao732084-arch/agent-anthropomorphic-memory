@@ -31,6 +31,13 @@ python3 {baseDir}/src/memory.py <command> ...
 **可以先缓冲**（用 `add-pending`，等 `consolidate` 批量处理）：对话中顺带提到、
 重要性不确定的信息。
 
+AI 对用户给出的具体建议、解释或方案也用 `add-pending --source assistant` 保存。
+`source: assistant` 的 fact 仅表示“AI 曾说过这句话”，不表示用户确认了内容。
+它不会覆盖用户事实，也不用于证实用户推断或生成用户画像摘要。不要保存思考过程、工具调用或工具输出。
+
+`collect_from_sessions.py` 默认采集用户和 AI 的文本回复；`--user-only` 可退回只采集用户。
+采集只是入缓冲，仍需 `consolidate` 完成过滤和整理。
+
 **不要记**：寒暄（"好的"、"哈哈"）、一次性查询（天气、计算、翻译）、
 你自己的推测（除非用 `--type belief` 并给出 `--confidence`）、密码和密钥。
 系统也会自动拒绝寒暄、不含事实的提问，以及密码、密钥、证件号等敏感信息（`capture` 会说明原因）。
@@ -41,6 +48,8 @@ python3 {baseDir}/src/memory.py <command> ...
 python3 {baseDir}/src/memory.py capture "我对花生过敏"
 python3 {baseDir}/src/memory.py capture --type belief --confidence 0.6 "用户可能在准备考研"
 python3 {baseDir}/src/memory.py add-pending "周末去爬了香山"
+python3 {baseDir}/src/memory.py add-pending "建议先读《天文学入门》" --source assistant
+python3 {baseDir}/src/collect_from_sessions.py --hours 24
 ```
 
 ## 什么时候检索
@@ -57,7 +66,8 @@ python3 {baseDir}/src/memory.py get f_20261028_477300      # 需要细节时按 
 
 ### 怎么用检索结果
 
-- `type: fact` 且分数高：可以直接引用
+- 先看 `source` / `role`：`assistant` 只能用于“我当时建议过……”等回忆，不能作为用户事实
+- 用户来源的 `type: fact` 且分数高：可以直接引用
 - `type: belief` 或 `confidence` < 0.8：用商量语气（"我记得你好像……？"）
 - 结果互相矛盾时，以较新的为准，并向用户确认
 - 检索不到就说不记得，不要编
@@ -74,6 +84,10 @@ python3 {baseDir}/src/memory.py consolidate
 
 Layer 1 快照在 `memory/layer1/snapshot.md`（约 2000 tokens，最重要的记忆）。
 新会话开始、需要了解用户全貌时读它。
+
+衰减只降低排名，不会因为分数低而移出活跃池。旧配置中的 `thresholds.archive`
+不再触发归档；手动归档和被更正后的失效归档仍有效。升级不会自动恢复历史归档，
+因为旧记录可能没有归档原因，无法安全区分“衰减”与“手动移除”。
 
 ## 与 OpenClaw 自带记忆的关系
 
@@ -103,7 +117,7 @@ skill 写入；回答涉及过去的问题前先用它检索。"
 
 ### 可选：语义检索
 
-默认只按关键词检索，查"宠物"找不到"我养了一只橘猫"。配置 embedding 后，换个说法也能查到：
+默认使用本地 BM25（词语稀有度、词频饱和、长度归一化）检索，查"宠物"找不到"我养了一只橘猫"。配置 embedding 后，换个说法也能查到：
 
 ```bash
 # 任何 OpenAI 兼容的 /embeddings 接口（OpenAI、硅基流动、Ollama、LM Studio 等），零依赖

@@ -8,7 +8,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import hashlib
 
 def get_workspace():
@@ -96,9 +96,9 @@ def user_text(raw):
     return text
 
 
-def extract_user_messages(session_file, hours=24):
-    """从对话文件提取用户消息(hours=None 表示不按时间过滤)"""
-    cutoff = datetime.now() - timedelta(hours=hours) if hours else None
+def extract_messages(session_file, hours=24, include_assistant=True):
+    """提取用户原话和 AI 对外回复；不采集工具调用、工具输出或思考块。"""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours) if hours else None
     messages = []
 
     try:
@@ -115,13 +115,16 @@ def extract_user_messages(session_file, hours=24):
                 if entry.get('type') != 'message':
                     continue
                 message = entry.get('message', {})
-                if message.get('role') != 'user':
+                role = message.get('role')
+                if role not in ({'user', 'assistant'} if include_assistant else {'user'}):
                     continue
 
                 timestamp_str = entry.get('timestamp')
                 if cutoff and timestamp_str:
                     timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-                    if timestamp.replace(tzinfo=None) < cutoff:
+                    if timestamp.tzinfo is None:
+                        timestamp = timestamp.replace(tzinfo=timezone.utc)
+                    if timestamp < cutoff:
                         continue
 
                 content = message.get('content', [])
@@ -131,14 +134,18 @@ def extract_user_messages(session_file, hours=24):
                     raw = '\n'.join(
                         item.get('text', '') for item in content if isinstance(item, dict) and item.get('type') == 'text'
                     )
-                text = user_text(raw)
+                text = user_text(raw) if role == 'user' else raw.strip()
+                if role == 'assistant' and text in {'NO_REPLY', 'HEARTBEAT_OK'}:
+                    continue
                 # 太短的通常是"好的""嗯",交给 memory.py 的噪声过滤也行,这里先挡掉单字
                 if not text or len(text) < 2:
                     continue
 
                 messages.append({
                     'content': text,
-                    'timestamp': timestamp_str or datetime.now().isoformat() + 'Z',
+                    'source': role,
+                    'role': role,
+                    'timestamp': timestamp_str or datetime.now(timezone.utc).isoformat(),
                     'session': session_file.stem
                 })
     except OSError as e:
@@ -147,14 +154,19 @@ def extract_user_messages(session_file, hours=24):
     return messages
 
 
-def generate_id(content, timestamp):
+def extract_user_messages(session_file, hours=24):
+    """兼容旧调用方：只提取用户原话。"""
+    return extract_messages(session_file, hours, include_assistant=False)
+
+
+def generate_id(content, timestamp, source='user'):
     """生成记忆 ID"""
-    hash_input = f"{content}_{timestamp}"
+    hash_input = f"{content}_{timestamp}" if source == "user" else f"{source}_{content}_{timestamp}"
     hash_hex = hashlib.md5(hash_input.encode()).hexdigest()[:6]
     date_str = timestamp[:10].replace('-', '')
     return f"p_{date_str}_{hash_hex}"
 
-def collect_from_sessions(hours=24, dry_run=False):
+def collect_from_sessions(hours=24, dry_run=False, include_assistant=True):
     """从对话转录本收集记忆"""
     sessions_dir = get_sessions_dir()
     memory_dir = get_memory_dir()
@@ -187,15 +199,15 @@ def collect_from_sessions(hours=24, dry_run=False):
     # 提取消息
     all_messages = []
     for session_file in recent_files:
-        messages = extract_user_messages(session_file, hours)
+        messages = extract_messages(session_file, hours, include_assistant)
         all_messages.extend(messages)
     
-    print(f"💬 提取到 {len(all_messages)} 条用户消息")
+    print(f"💬 提取到 {len(all_messages)} 条对话消息")
     
     # 转换为 pending 格式
     new_count = 0
     for msg in all_messages:
-        msg_id = generate_id(msg['content'], msg['timestamp'])
+        msg_id = generate_id(msg['content'], msg['timestamp'], msg['source'])
         
         # 去重
         if msg_id in existing_ids:
@@ -204,7 +216,8 @@ def collect_from_sessions(hours=24, dry_run=False):
         pending_item = {
             'id': msg_id,
             'content': msg['content'],
-            'source': 'user',
+            'source': msg['source'],
+            'role': msg['role'],
             'created': msg['timestamp'],
             'urgent': False,
             'importance': 0.5,  # 默认重要性
@@ -237,10 +250,11 @@ if __name__ == '__main__':
     parser.add_argument('--hours', type=int, default=24, help='收集最近 N 小时的对话 (默认 24)')
     parser.add_argument('--dry-run', action='store_true', help='预览模式，不实际写入')
     
+    parser.add_argument('--user-only', action='store_true', help='仅采集用户消息（默认也采集 AI 回复）')
     args = parser.parse_args()
     
     try:
-        new_count = collect_from_sessions(args.hours, args.dry_run)
+        new_count = collect_from_sessions(args.hours, args.dry_run, not args.user_only)
         sys.exit(0 if new_count >= 0 else 1)
     except Exception as e:
         print(f"❌ 收集失败: {e}", file=sys.stderr)

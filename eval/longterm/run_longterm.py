@@ -114,8 +114,10 @@ def replay(timeline, cfg, memory_dir, ingest_roles, archive_threshold=None):
     env = config_env(cfg)
     first = timeline["sessions"][0]["date"]
     cli(memory_dir, f"{first}T08:00:00Z", env, "init")
+    if archive_threshold not in (None, 0):
+        raise ValueError("衰减归档已移除；复现历史阈值实验请使用提交 04b164e")
     if archive_threshold is not None:
-        # 评测用：调整衰减归档阈值（0 = 分数照常衰减，但不移入归档池）
+        # 仅兼容旧命令 --archive-threshold 0
         config_path = memory_dir / "config.json"
         config = json.loads(config_path.read_text(encoding="utf-8"))
         config["thresholds"]["archive"] = archive_threshold
@@ -125,7 +127,7 @@ def replay(timeline, cfg, memory_dir, ingest_roles, archive_threshold=None):
             if turn["role"] in ingest_roles and turn["text"].strip():
                 minute = min(i, 59 * 8)
                 now = f"{session['date']}T{10 + minute // 60:02d}:{minute % 60:02d}:00Z"
-                cli(memory_dir, now, env, "add-pending", turn["text"])
+                cli(memory_dir, now, env, "add-pending", turn["text"], "--source", turn["role"])
         cli(memory_dir, f"{session['date']}T23:00:00Z", env, "consolidate", "--force")
 
 
@@ -189,7 +191,9 @@ GRADE_PROMPT = """问题：{q}
 回答与标准答案意思一致（措辞、日期格式不同、多给了不矛盾的细节都算一致）则判对；答错、答不全关键点、或说不记得，判错。
 只输出 JSON：{{"correct": true 或 false}}"""
 
-ABSTAIN = re.compile(r"不记得|没有提到|没提过|不知道|无法确定|没有相关|don'?t (remember|know)|not mentioned|no information|cannot (be )?determine", re.I)
+# Models emit both ASCII and typographic apostrophes. Punctuation must not turn
+# the same abstention into a wrong answer on the unanswerable-question subset.
+ABSTAIN = re.compile(r"不记得|没有提到|没提过|不知道|无法确定|没有相关|don['’ʼ]?t (remember|know)|not mentioned|no information|cannot (be )?determine", re.I)
 
 
 def grade(llm, q, pred):
@@ -271,9 +275,12 @@ def main():
     ap.add_argument("--configs", default="no_memory,full_context,rule,semantic,semantic_judge")
     ap.add_argument("--model", default="deepseek-flash")
     ap.add_argument("--k", type=int, default=10, help="每题检索的记忆条数")
-    ap.add_argument("--ingest-assistant", action="store_true", help="AI 的回复也写入记忆（默认只写用户的话）")
+    roles_group = ap.add_mutually_exclusive_group()
+    roles_group.add_argument("--ingest-assistant", dest="ingest_assistant", action="store_true", help="写入用户和 AI 回复（默认）")
+    roles_group.add_argument("--user-only", dest="ingest_assistant", action="store_false", help="只写用户消息，用于消融实验")
+    ap.set_defaults(ingest_assistant=True)
     ap.add_argument("--jobs", type=int, default=6)
-    ap.add_argument("--archive-threshold", type=float, help="覆盖衰减归档阈值（默认用系统配置 0.05；0 表示不因衰减归档）")
+    ap.add_argument("--archive-threshold", type=float, choices=[0], help="兼容旧命令，仅接受 0；默认不再衰减归档")
     ap.add_argument("--cache", default=str(Path(tempfile.gettempdir()) / "longterm-llm-cache"))
     ap.add_argument("--out", help="逐题结果 JSON")
     args = ap.parse_args()
@@ -303,7 +310,7 @@ def main():
     report(all_results)
     if args.out:
         Path(args.out).write_text(
-            json.dumps({"results": all_results, "stats": all_stats}, ensure_ascii=False, indent=1), encoding="utf-8"
+            json.dumps({"results": all_results, "stats": all_stats, "settings": {"ingest_roles": sorted(roles), "decay_archival": False, "retrieval": "bm25", "model": args.model, "k": args.k}}, ensure_ascii=False, indent=1), encoding="utf-8"
         )
 
 

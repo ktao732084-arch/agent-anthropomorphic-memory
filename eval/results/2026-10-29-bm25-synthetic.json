@@ -1,0 +1,149 @@
+{
+  "date": "2026-10-29",
+  "scope": "84 synthetic cases, pending mode, pure rules, k=3; NOT long-term QA accuracy",
+  "command": "python eval/run_eval.py --json results.json",
+  "baseline_commit": "04b164e",
+  "baseline_passed": 145,
+  "current_passed": 145,
+  "assertions": 166,
+  "regressions": [],
+  "improvements": [],
+  "remaining_failures": [
+    {
+      "case": "correction-02",
+      "day": 2,
+      "metric": "stale",
+      "detail": "查询「住在」→ ['我住在北京海淀区', '我现在住在上海浦东了，上个月（2026-02）搬的'] 不应出现过时信息 ['北京']"
+    },
+    {
+      "case": "correction-03",
+      "day": 2,
+      "metric": "stale",
+      "detail": "查询「后端」→ ['我在腾讯做后端开发', '我已经从腾讯离职了，现在在字节跳动做后端'] 不应出现过时信息 ['腾讯']"
+    },
+    {
+      "case": "correction-04",
+      "day": 2,
+      "metric": "stale",
+      "detail": "查询「咖啡」→ ['我不再喝咖啡了，改喝茶', '我每天要喝三杯咖啡'] 不应出现过时信息 ['三杯']"
+    },
+    {
+      "case": "correction-10",
+      "day": 2,
+      "metric": "stale",
+      "detail": "查询「妹妹」→ ['我妹妹在读高三', '我妹妹已经上大学了，在武汉大学'] 不应出现过时信息 ['高三']"
+    },
+    {
+      "case": "dedup-03",
+      "day": 2,
+      "metric": "unique",
+      "detail": "['年糕'] 最多 1 条，实际 2 条: ['我养了一只橘猫叫年糕', '我家年糕是只橘猫']"
+    },
+    {
+      "case": "dedup-04",
+      "day": 1,
+      "metric": "unique",
+      "detail": "['协和'] 最多 1 条，实际 2 条: ['我在协和医学院读书', '我是协和的学生']"
+    },
+    {
+      "case": "paraphrase-01",
+      "day": 1,
+      "metric": "hit",
+      "detail": "查询「坚果」→ [] 应包含 ['花生']"
+    },
+    {
+      "case": "paraphrase-02",
+      "day": 1,
+      "metric": "hit",
+      "detail": "查询「忌口」→ [] 应包含 ['香菜']"
+    },
+    {
+      "case": "paraphrase-03",
+      "day": 1,
+      "metric": "hit",
+      "detail": "查询「对象」→ [] 应包含 ['苏晴']"
+    },
+    {
+      "case": "paraphrase-04",
+      "day": 1,
+      "metric": "hit",
+      "detail": "查询「学校」→ [] 应包含 ['协和']"
+    },
+    {
+      "case": "paraphrase-05",
+      "day": 1,
+      "metric": "hit",
+      "detail": "查询「健康状况」→ [] 应包含 ['高血压']"
+    },
+    {
+      "case": "paraphrase-06",
+      "day": 1,
+      "metric": "hit",
+      "detail": "查询「宠物」→ [] 应包含 ['年糕']"
+    },
+    {
+      "case": "paraphrase-07",
+      "day": 1,
+      "metric": "hit",
+      "detail": "查询「工作」→ [] 应包含 ['嵌入式']"
+    },
+    {
+      "case": "paraphrase-08",
+      "day": 1,
+      "metric": "hit",
+      "detail": "查询「家乡」→ [] 应包含 ['岳阳']"
+    },
+    {
+      "case": "paraphrase-10",
+      "day": 1,
+      "metric": "hit",
+      "detail": "查询「peanut allergy」→ [] 应包含 ['花生']"
+    },
+    {
+      "case": "shift-01",
+      "day": 2,
+      "metric": "stale",
+      "detail": "查询「咖啡」→ ['最近改喝美式咖啡了', '我最喜欢喝拿铁咖啡'] 不应出现过时信息 ['拿铁']"
+    },
+    {
+      "case": "shift-02",
+      "day": 2,
+      "metric": "stale",
+      "detail": "查询「苏晴」→ ['我和苏晴分手了', '我女朋友叫苏晴'] 不应出现过时信息 ['女朋友叫苏晴']"
+    },
+    {
+      "case": "shift-03",
+      "day": 2,
+      "metric": "stale",
+      "detail": "查询「减肥」→ ['我在减肥，晚上不吃饭', '减肥结束了，现在正常吃晚饭'] 不应出现过时信息 ['晚上不吃饭']"
+    },
+    {
+      "case": "shift-04",
+      "day": 2,
+      "metric": "stale",
+      "detail": "查询「健身」→ ['健身卡到期了，现在在家跑步', '我每周三晚上去健身房'] 不应出现过时信息 ['每周三']"
+    },
+    {
+      "case": "shift-05",
+      "day": 2,
+      "metric": "stale",
+      "detail": "查询「iPhone」→ ['我在用 iPhone 13', '新买了一台华为 Mate 70，iPhone 送给我妈了'] 不应出现过时信息 ['在用 iphone']"
+    },
+    {
+      "case": "temporal-09",
+      "day": 2,
+      "metric": "stale",
+      "detail": "查询「实验报告」→ ['实验报告已经提前交完了', '这周五（2026-03-06）我要交实验报告'] 不应出现过时信息 ['要交']"
+    }
+  ],
+  "targeted_regression_tests": {
+    "passed": 9,
+    "total": 9
+  },
+  "existing_test_scripts": {
+    "passed": 11,
+    "total": 11
+  },
+  "temporal_self_test": "passed",
+  "longterm_llm_evaluation": "not rerun"
+}

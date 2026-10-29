@@ -10,9 +10,9 @@
   },
   
   "thresholds": {
-    "archive": 0.05,
+    "archive": 0,
     "summary_trigger": 3,
-    "_comment": "score < 0.05 归档；同主题 >= 3 facts 触发摘要生成"
+    "_comment": "archive 为旧版兼容字段，不再触发衰减归档；同主题 >= 3 facts 触发摘要生成"
   },
   
   "token_budget": {
