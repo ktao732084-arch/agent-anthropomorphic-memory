@@ -191,7 +191,9 @@ GRADE_PROMPT = """问题：{q}
 回答与标准答案意思一致（措辞、日期格式不同、多给了不矛盾的细节都算一致）则判对；答错、答不全关键点、或说不记得，判错。
 只输出 JSON：{{"correct": true 或 false}}"""
 
-ABSTAIN = re.compile(r"不记得|没有提到|没提过|不知道|无法确定|没有相关|don'?t (remember|know)|not mentioned|no information|cannot (be )?determine", re.I)
+# Models emit both ASCII and typographic apostrophes. Punctuation must not turn
+# the same abstention into a wrong answer on the unanswerable-question subset.
+ABSTAIN = re.compile(r"不记得|没有提到|没提过|不知道|无法确定|没有相关|don['’ʼ]?t (remember|know)|not mentioned|no information|cannot (be )?determine", re.I)
 
 
 def grade(llm, q, pred):

@@ -1,0 +1,386 @@
+{
+  "date": "2026-10-29",
+  "model": "deepseek-flash",
+  "temperature": 0,
+  "retrieval_k": 10,
+  "baseline_commit": "04b164e",
+  "improved_commit": "3afd06c",
+  "comparison": "paired fresh rerun; baseline is after event-expiry fix",
+  "memorybank_gold": "regenerated once and frozen; previous gold cache unavailable",
+  "public_source_commits": [
+    {
+      "name": "MemoryBank-SiliconFriend",
+      "repo": "zhongwanjun/MemoryBank-SiliconFriend",
+      "commit": "cf61c4196e4cfdb0f2b7a0316249fa40312dc3a9"
+    },
+    {
+      "name": "PerLTQA",
+      "repo": "Elvin-Yiming-Du/PerLTQA",
+      "commit": "8d9e19868e239740ef701e603ec205cd581f221b"
+    },
+    {
+      "name": "locomo",
+      "repo": "snap-research/locomo",
+      "commit": "3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376"
+    }
+  ],
+  "public_frozen_input_sha256": "269a1158bbb7734a533c326d462077d8b40cb8019e0b1ea1f4815f6933ca7dce",
+  "private_question_count": 42,
+  "private_cohort": "same fixed user-message-only cohort; no assistant turns",
+  "scope": "default rule baseline vs all three improvements together; no per-change ablation",
+  "scoring_fix": "English Unicode apostrophes recognized as abstention; existing responses rescored on both sides",
+  "abstention_corrections": {
+    "public": {
+      "baseline": 11,
+      "improved": 13
+    },
+    "private": {
+      "baseline": 0,
+      "improved": 0
+    }
+  },
+  "before_scoring_fix": {
+    "public": {
+      "baseline": 107,
+      "improved": 178
+    },
+    "private": {
+      "baseline": 21,
+      "improved": 23
+    }
+  },
+  "token_budget_policy": "Original caps (gold 2048, answer 1024, grade 512); retry only empty/truncated completions up to 8192, identically for both variants",
+  "token_budget_escalations": {
+    "public": {
+      "baseline": 1,
+      "improved": 10
+    },
+    "private": {
+      "baseline": 1,
+      "improved": 1
+    }
+  },
+  "uncertainty": "One answer generation per variant/question; private saved answers graded twice; no claim of statistical significance",
+  "private_grading_repeat": {
+    "baseline": {
+      "first_correct": 21,
+      "second_correct": 22,
+      "changed_decisions": 1
+    },
+    "improved": {
+      "first_correct": 23,
+      "second_correct": 23,
+      "changed_decisions": 0
+    }
+  },
+  "overall": {
+    "public": {
+      "questions": 307,
+      "baseline_correct": 118,
+      "improved_correct": 191,
+      "baseline_accuracy": 0.38436482084690554,
+      "improved_accuracy": 0.6221498371335505,
+      "delta_correct": 73,
+      "delta_percentage_points": 23.778501628664497,
+      "wrong_to_right": 89,
+      "right_to_wrong": 16,
+      "both_right": 102,
+      "both_wrong": 100
+    },
+    "private": {
+      "questions": 42,
+      "baseline_correct": 21,
+      "improved_correct": 23,
+      "baseline_accuracy": 0.5,
+      "improved_accuracy": 0.5476190476190477,
+      "delta_correct": 2,
+      "delta_percentage_points": 4.761904761904762,
+      "wrong_to_right": 4,
+      "right_to_wrong": 2,
+      "both_right": 19,
+      "both_wrong": 17
+    }
+  },
+  "datasets": {
+    "locomo": {
+      "questions": 107,
+      "baseline_correct": 37,
+      "improved_correct": 52,
+      "baseline_accuracy": 0.34579439252336447,
+      "improved_accuracy": 0.48598130841121495,
+      "delta_correct": 15,
+      "delta_percentage_points": 14.018691588785046,
+      "wrong_to_right": 22,
+      "right_to_wrong": 7,
+      "both_right": 30,
+      "both_wrong": 48
+    },
+    "memorybank": {
+      "questions": 100,
+      "baseline_correct": 49,
+      "improved_correct": 77,
+      "baseline_accuracy": 0.49,
+      "improved_accuracy": 0.77,
+      "delta_correct": 28,
+      "delta_percentage_points": 28.0,
+      "wrong_to_right": 31,
+      "right_to_wrong": 3,
+      "both_right": 46,
+      "both_wrong": 20
+    },
+    "perltqa": {
+      "questions": 100,
+      "baseline_correct": 32,
+      "improved_correct": 62,
+      "baseline_accuracy": 0.32,
+      "improved_accuracy": 0.62,
+      "delta_correct": 30,
+      "delta_percentage_points": 30.0,
+      "wrong_to_right": 36,
+      "right_to_wrong": 6,
+      "both_right": 26,
+      "both_wrong": 32
+    },
+    "private": {
+      "questions": 42,
+      "baseline_correct": 21,
+      "improved_correct": 23,
+      "baseline_accuracy": 0.5,
+      "improved_accuracy": 0.5476190476190477,
+      "delta_correct": 2,
+      "delta_percentage_points": 4.761904761904762,
+      "wrong_to_right": 4,
+      "right_to_wrong": 2,
+      "both_right": 19,
+      "both_wrong": 17
+    }
+  },
+  "categories": [
+    {
+      "dataset": "locomo",
+      "category": "abstention",
+      "questions": 24,
+      "baseline_correct": 23,
+      "improved_correct": 22,
+      "baseline_accuracy": 0.9583333333333334,
+      "improved_accuracy": 0.9166666666666666,
+      "delta_correct": -1,
+      "delta_percentage_points": -4.166666666666667,
+      "wrong_to_right": 1,
+      "right_to_wrong": 2,
+      "both_right": 21,
+      "both_wrong": 0
+    },
+    {
+      "dataset": "locomo",
+      "category": "extraction",
+      "questions": 24,
+      "baseline_correct": 5,
+      "improved_correct": 13,
+      "baseline_accuracy": 0.20833333333333334,
+      "improved_accuracy": 0.5416666666666666,
+      "delta_correct": 8,
+      "delta_percentage_points": 33.333333333333336,
+      "wrong_to_right": 9,
+      "right_to_wrong": 1,
+      "both_right": 4,
+      "both_wrong": 10
+    },
+    {
+      "dataset": "locomo",
+      "category": "inference",
+      "questions": 12,
+      "baseline_correct": 3,
+      "improved_correct": 1,
+      "baseline_accuracy": 0.25,
+      "improved_accuracy": 0.08333333333333333,
+      "delta_correct": -2,
+      "delta_percentage_points": -16.666666666666668,
+      "wrong_to_right": 0,
+      "right_to_wrong": 2,
+      "both_right": 1,
+      "both_wrong": 9
+    },
+    {
+      "dataset": "locomo",
+      "category": "multi_session",
+      "questions": 23,
+      "baseline_correct": 2,
+      "improved_correct": 1,
+      "baseline_accuracy": 0.08695652173913043,
+      "improved_accuracy": 0.043478260869565216,
+      "delta_correct": -1,
+      "delta_percentage_points": -4.3478260869565215,
+      "wrong_to_right": 0,
+      "right_to_wrong": 1,
+      "both_right": 1,
+      "both_wrong": 21
+    },
+    {
+      "dataset": "locomo",
+      "category": "temporal",
+      "questions": 24,
+      "baseline_correct": 4,
+      "improved_correct": 15,
+      "baseline_accuracy": 0.16666666666666666,
+      "improved_accuracy": 0.625,
+      "delta_correct": 11,
+      "delta_percentage_points": 45.833333333333336,
+      "wrong_to_right": 12,
+      "right_to_wrong": 1,
+      "both_right": 3,
+      "both_wrong": 8
+    },
+    {
+      "dataset": "memorybank",
+      "category": "assistant_said",
+      "questions": 36,
+      "baseline_correct": 8,
+      "improved_correct": 29,
+      "baseline_accuracy": 0.2222222222222222,
+      "improved_accuracy": 0.8055555555555556,
+      "delta_correct": 21,
+      "delta_percentage_points": 58.333333333333336,
+      "wrong_to_right": 22,
+      "right_to_wrong": 1,
+      "both_right": 7,
+      "both_wrong": 6
+    },
+    {
+      "dataset": "memorybank",
+      "category": "extraction",
+      "questions": 40,
+      "baseline_correct": 26,
+      "improved_correct": 33,
+      "baseline_accuracy": 0.65,
+      "improved_accuracy": 0.825,
+      "delta_correct": 7,
+      "delta_percentage_points": 17.5,
+      "wrong_to_right": 8,
+      "right_to_wrong": 1,
+      "both_right": 25,
+      "both_wrong": 6
+    },
+    {
+      "dataset": "memorybank",
+      "category": "temporal",
+      "questions": 24,
+      "baseline_correct": 15,
+      "improved_correct": 15,
+      "baseline_accuracy": 0.625,
+      "improved_accuracy": 0.625,
+      "delta_correct": 0,
+      "delta_percentage_points": 0.0,
+      "wrong_to_right": 1,
+      "right_to_wrong": 1,
+      "both_right": 14,
+      "both_wrong": 8
+    },
+    {
+      "dataset": "perltqa",
+      "category": "extraction",
+      "questions": 100,
+      "baseline_correct": 32,
+      "improved_correct": 62,
+      "baseline_accuracy": 0.32,
+      "improved_accuracy": 0.62,
+      "delta_correct": 30,
+      "delta_percentage_points": 30.0,
+      "wrong_to_right": 36,
+      "right_to_wrong": 6,
+      "both_right": 26,
+      "both_wrong": 32
+    },
+    {
+      "dataset": "private",
+      "category": "abstention",
+      "questions": 8,
+      "baseline_correct": 8,
+      "improved_correct": 8,
+      "baseline_accuracy": 1.0,
+      "improved_accuracy": 1.0,
+      "delta_correct": 0,
+      "delta_percentage_points": 0.0,
+      "wrong_to_right": 0,
+      "right_to_wrong": 0,
+      "both_right": 8,
+      "both_wrong": 0
+    },
+    {
+      "dataset": "private",
+      "category": "extraction",
+      "questions": 15,
+      "baseline_correct": 6,
+      "improved_correct": 8,
+      "baseline_accuracy": 0.4,
+      "improved_accuracy": 0.5333333333333333,
+      "delta_correct": 2,
+      "delta_percentage_points": 13.333333333333334,
+      "wrong_to_right": 2,
+      "right_to_wrong": 0,
+      "both_right": 6,
+      "both_wrong": 7
+    },
+    {
+      "dataset": "private",
+      "category": "multi_session",
+      "questions": 4,
+      "baseline_correct": 0,
+      "improved_correct": 0,
+      "baseline_accuracy": 0.0,
+      "improved_accuracy": 0.0,
+      "delta_correct": 0,
+      "delta_percentage_points": 0.0,
+      "wrong_to_right": 0,
+      "right_to_wrong": 0,
+      "both_right": 0,
+      "both_wrong": 4
+    },
+    {
+      "dataset": "private",
+      "category": "preference",
+      "questions": 5,
+      "baseline_correct": 1,
+      "improved_correct": 0,
+      "baseline_accuracy": 0.2,
+      "improved_accuracy": 0.0,
+      "delta_correct": -1,
+      "delta_percentage_points": -20.0,
+      "wrong_to_right": 0,
+      "right_to_wrong": 1,
+      "both_right": 0,
+      "both_wrong": 4
+    },
+    {
+      "dataset": "private",
+      "category": "temporal",
+      "questions": 7,
+      "baseline_correct": 6,
+      "improved_correct": 6,
+      "baseline_accuracy": 0.8571428571428571,
+      "improved_accuracy": 0.8571428571428571,
+      "delta_correct": 0,
+      "delta_percentage_points": 0.0,
+      "wrong_to_right": 1,
+      "right_to_wrong": 1,
+      "both_right": 5,
+      "both_wrong": 0
+    },
+    {
+      "dataset": "private",
+      "category": "update",
+      "questions": 3,
+      "baseline_correct": 0,
+      "improved_correct": 1,
+      "baseline_accuracy": 0.0,
+      "improved_accuracy": 0.3333333333333333,
+      "delta_correct": 1,
+      "delta_percentage_points": 33.333333333333336,
+      "wrong_to_right": 1,
+      "right_to_wrong": 0,
+      "both_right": 0,
+      "both_wrong": 2
+    }
+  ],
+  "gold_token_budget_escalations": 0
+}

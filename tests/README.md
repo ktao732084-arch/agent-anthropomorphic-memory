@@ -14,6 +14,7 @@ python3 tests/test_embeddings.py   # 语义向量（用本地假服务测 OpenAI
 python3 tests/test_llm_judge.py    # LLM 写入判断（用本地假服务测链路）
 python3 tests/test_collector.py    # 会话收集器（剥元数据外壳、修复非法转义）
 python3 tests/test_longterm_recall.py  # AI 来源隔离、BM25 排名、低分保留
+python3 tests/test_longterm_scoring.py # 英文弯引号拒答判分（3/3）
 python3 tests/test_consolidate_types.py  # summary 类型不导致 consolidate 崩溃
 python3 src/temporal.py        # 相对时间换算自测
 ```
