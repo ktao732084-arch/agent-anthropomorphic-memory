@@ -59,7 +59,7 @@ def save_pending(memory_dir, pending):
 #   ```
 #   [Sun 2026-03-01 10:00 GMT+8] 用户原话
 _ENVELOPE = re.compile(r'^\s*(Conversation info|Sender) \(untrusted metadata\):\s*```(?:json)?\s*.*?```\s*', re.S)
-_STAMP = re.compile(r'^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{4}-\d{2}-\d{2} \d{1,2}:\d{2}(?: GMT[+-]\d+)?\]\s*')
+_STAMP = re.compile(r'^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{4}-\d{2}-\d{2} \d{1,2}:\d{2}(?::\d{2})?(?: (?:GMT[+-]\d+|UTC))?\]\s*')
 # 不是用户本人说的话:系统事件、定时任务、心跳、压缩前记忆保存提示
 _NOT_USER = ('System:', '[cron:', 'Read HEARTBEAT.md', 'Pre-compaction memory flush')
 _ESCAPE = re.compile(r'\\(.)', re.S)
@@ -96,8 +96,15 @@ def user_text(raw):
     return text
 
 
-def extract_user_messages(session_file, hours=24):
-    """从对话文件提取用户消息(hours=None 表示不按时间过滤)"""
+def extract_user_messages(session_file, hours=24, include_assistant=None):
+    """
+    从对话文件提取消息(hours=None 表示不按时间过滤)
+
+    默认同时收集 AI 的回复(source=assistant),让记忆系统记得"你推荐过我什么";
+    设置环境变量 MEMORY_COLLECT_ASSISTANT=0 只收集用户消息。
+    """
+    if include_assistant is None:
+        include_assistant = os.environ.get('MEMORY_COLLECT_ASSISTANT', '1') != '0'
     cutoff = datetime.now() - timedelta(hours=hours) if hours else None
     messages = []
 
@@ -115,7 +122,8 @@ def extract_user_messages(session_file, hours=24):
                 if entry.get('type') != 'message':
                     continue
                 message = entry.get('message', {})
-                if message.get('role') != 'user':
+                role = message.get('role')
+                if role not in ('user', 'assistant') or (role == 'assistant' and not include_assistant):
                     continue
 
                 timestamp_str = entry.get('timestamp')
@@ -131,7 +139,7 @@ def extract_user_messages(session_file, hours=24):
                     raw = '\n'.join(
                         item.get('text', '') for item in content if isinstance(item, dict) and item.get('type') == 'text'
                     )
-                text = user_text(raw)
+                text = user_text(raw) if role == 'user' else raw.strip()
                 # 太短的通常是"好的""嗯",交给 memory.py 的噪声过滤也行,这里先挡掉单字
                 if not text or len(text) < 2:
                     continue
@@ -139,7 +147,8 @@ def extract_user_messages(session_file, hours=24):
                 messages.append({
                     'content': text,
                     'timestamp': timestamp_str or datetime.now().isoformat() + 'Z',
-                    'session': session_file.stem
+                    'session': session_file.stem,
+                    'source': role,
                 })
     except OSError as e:
         print(f"⚠️ 读取文件出错 {session_file}: {e}", file=sys.stderr)
@@ -204,7 +213,7 @@ def collect_from_sessions(hours=24, dry_run=False):
         pending_item = {
             'id': msg_id,
             'content': msg['content'],
-            'source': 'user',
+            'source': msg.get('source', 'user'),
             'created': msg['timestamp'],
             'urgent': False,
             'importance': 0.5,  # 默认重要性

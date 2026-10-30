@@ -37,6 +37,7 @@ def check(name, ok, detail=""):
 def main():
     results = []
     results.append(check("剥掉元数据外壳和时间戳", user_text(ENVELOPE + "我下周三有面试") == "我下周三有面试"))
+    results.append(check("UTC 时间戳前缀也剥掉", user_text("[Sat 2026-03-28 07:21 UTC] 还有一个问题") == "还有一个问题"))
     results.append(
         check(
             "系统事件、定时任务、心跳、压缩提示不算用户的话",
@@ -64,12 +65,20 @@ def main():
             '"content": [{"type": "text", "text": "我的项目放在 C:\\\\Users\\x\\\\code 下面"}]}}',
         ]
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        msgs = [m["content"] for m in extract_user_messages(path, hours=None)]
+        user_only = [m["content"] for m in extract_user_messages(path, hours=None, include_assistant=False)]
         results.append(
             check(
-                "只收集用户原话，修复非法转义的行",
-                msgs == ["记住，我对青霉素过敏", "我的项目放在 C:\\Users\\x\\code 下面"],
-                f"{msgs}",
+                "只收用户时：取原话、修复非法转义的行",
+                user_only == ["记住，我对青霉素过敏", "我的项目放在 C:\\Users\\x\\code 下面"],
+                f"{user_only}",
+            )
+        )
+        both = [(m["source"], m["content"]) for m in extract_user_messages(path, hours=None)]
+        results.append(
+            check(
+                "默认同时收集 AI 回复（source=assistant），系统事件仍过滤",
+                ("assistant", "好的，记住了") in both and ("user", "记住，我对青霉素过敏") in both and len(both) == 3,
+                f"{both}",
             )
         )
 

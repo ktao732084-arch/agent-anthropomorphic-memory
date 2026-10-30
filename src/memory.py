@@ -773,6 +773,12 @@ def rule_filter(segments, threshold=0.3, use_llm_fallback=True):
         content = segment.get("content", "") if isinstance(segment, dict) else segment
         source = segment.get("source", "unknown") if isinstance(segment, dict) else "unknown"
         created = segment.get("created") if isinstance(segment, dict) else None
+        if source == "assistant":
+            # AI 回复:去掉 [[reply_to_current]] 这类回复指令;"好嘞""明白"这种短应答不记
+            content = clean_assistant_text(content)
+            if len(content) < ASSISTANT_MIN_CHARS:
+                noise_skipped += 1
+                continue
 
         # v1.2.0: 前置废话过滤(跳过明显废话,不进入 LLM)
         is_noise_content, noise_category = is_noise(content)
@@ -1022,6 +1028,19 @@ def extract_entities(content, memory_dir=None, use_llm_fallback=True):
 MEMORY_TYPE_PLURAL = {"fact": "facts", "belief": "beliefs", "summary": "summaries"}
 
 
+# AI 回复写入记忆时的标记与限制
+ASSISTANT_PREFIX = "（AI 说）"
+ASSISTANT_MAX_CHARS = 1500
+ASSISTANT_MIN_CHARS = 15
+ASSISTANT_MAX_IMPORTANCE = 0.6
+_REPLY_DIRECTIVE = re.compile(r"\[\[[a-z_:]+\]\]\s*")
+
+
+def clean_assistant_text(text):
+    """去掉 OpenClaw 的回复指令标记(如 [[reply_to_current]])"""
+    return _REPLY_DIRECTIVE.sub("", text).strip()
+
+
 def classify_memory_type(content, importance):
     """
     判断记忆类型: fact / belief / summary
@@ -1079,6 +1098,10 @@ def template_extract(filtered_segments, use_llm_fallback=True, memory_dir=None):
         importance = segment["importance"]
         source = segment.get("source", "unknown")
         method = segment.get("method", "rule")
+        if source == "assistant":
+            # AI 说过的话(推荐、建议、承诺):标明说话人,重要性封顶,避免压过用户自己的事
+            content = f"{ASSISTANT_PREFIX}{content[:ASSISTANT_MAX_CHARS]}"
+            importance = min(importance, ASSISTANT_MAX_IMPORTANCE)
 
         # 1. v1.1.5: 三层实体识别(传入 memory_dir)
         entities = extract_entities(content, memory_dir=memory_dir, use_llm_fallback=llm_enabled and phase3_llm)
@@ -1277,7 +1300,12 @@ def _deduplicate_with_operator(new_facts, existing_facts, events=None):
         targets = [target] if target else []
         llm = None
 
-        if operation == "ADD" and judge:
+        # AI 说的话不能更正或覆盖用户的记忆(AI 说"其实是……"不代表用户改口了),只去掉完全重复
+        from_assistant = new_fact.get("source") == "assistant"
+        if from_assistant and operation in ("DELETE", "UPDATE") and (target or {}).get("source") != "assistant":
+            operation, targets = "ADD", []
+
+        if operation == "ADD" and judge and not from_assistant:
             candidates = _judge_candidates(new_fact, existing_facts + merged, store, operator, judge.settings)
             verdict = judge.judge(new_fact, candidates)
             if verdict and verdict["decision"] != "ADD":
@@ -1775,44 +1803,72 @@ def classify_query_type(query, trigger_layer):
     return "topic"
 
 
+# ============================================================
+# BM25 关键词检索
+# 旧版按"命中了几个查询片段"打分,长消息几乎对任何查询都命中很多片段,
+# 会霸占检索结果;BM25 用 IDF 压低常见词、按文档长度归一化
+# ============================================================
+
+BM25_K1 = 1.5
+BM25_B = 0.75
+_BM25_TOKEN = re.compile(r"[\u4e00-\u9fff]+|[a-z0-9]+")
+
+
+def bm25_tokens(text):
+    """中文切成相邻两字(单字的段保留单字),英文/数字按单词;文档和查询用同一套切法"""
+    # "（AI 说）"只是说话人标记,不参与匹配(否则凡是提到 AI 的查询都会命中所有 AI 回复)
+    if text.startswith(ASSISTANT_PREFIX):
+        text = text[len(ASSISTANT_PREFIX) :]
+    tokens = []
+    for run in _BM25_TOKEN.findall(text.lower()):
+        if "\u4e00" <= run[0] <= "\u9fff":
+            tokens += [run[i : i + 2] for i in range(len(run) - 1)] if len(run) > 1 else [run]
+        else:
+            tokens.append(run)
+    return tokens
+
+
+def build_bm25_index(records):
+    """records: [(id, content)] → 可直接 json 保存的 BM25 索引"""
+    docs, df = {}, {}
+    for mem_id, content in records:
+        tf = {}
+        for t in bm25_tokens(content):
+            tf[t] = tf.get(t, 0) + 1
+        docs[mem_id] = {"len": sum(tf.values()), "tf": tf}
+        for t in tf:
+            df[t] = df.get(t, 0) + 1
+    n = len(docs)
+    avgdl = sum(d["len"] for d in docs.values()) / n if n else 0.0
+    return {"N": n, "avgdl": avgdl, "df": df, "docs": docs}
+
+
+def bm25_scores(query, index):
+    """返回 {id: BM25 分数},只含分数 > 0 的记忆"""
+    import math
+
+    n, avgdl = index["N"], index["avgdl"] or 1.0
+    q_tokens = set(bm25_tokens(query))
+    scores = {}
+    for t in q_tokens:
+        df = index["df"].get(t)
+        if not df:
+            continue
+        idf = math.log(1 + (n - df + 0.5) / (df + 0.5))
+        for mem_id, doc in index["docs"].items():
+            tf = doc["tf"].get(t)
+            if tf:
+                norm = tf * (BM25_K1 + 1) / (tf + BM25_K1 * (1 - BM25_B + BM25_B * doc["len"] / avgdl))
+                scores[mem_id] = scores.get(mem_id, 0.0) + idf * norm
+    return scores
+
+
 def keyword_search(query, memory_dir, limit=20):
     """
     基于关键词的检索
     返回: [(memory_id, score, content), ...]
     """
     import re
-
-    # 加载关键词索引
-    keywords_path = memory_dir / "layer2/index/keywords.json"
-    if not keywords_path.exists():
-        return []
-
-    with open(keywords_path, encoding="utf-8") as f:
-        keywords_index = json.load(f)
-
-    # 提取查询关键词(改进版);索引中英文已转小写,查询也转小写
-    query_words = set()
-    segments = re.split(r'[,.!?/;:""' r"()\[\][]\s]+", query.lower())
-    for seg in segments:
-        seg = seg.strip()
-        if len(seg) >= 2:
-            query_words.add(seg)
-        # 提取2-4字子串
-        for i in range(len(seg)):
-            for length in [2, 3, 4]:
-                if i + length <= len(seg):
-                    sub = seg[i : i + length]
-                    if len(sub) >= 2:
-                        query_words.add(sub)
-
-    # 计算每个记忆的匹配分数
-    memory_scores = {}
-    for word in query_words:
-        if word in keywords_index:
-            for mem_id in keywords_index[word]:
-                if mem_id not in memory_scores:
-                    memory_scores[mem_id] = 0
-                memory_scores[mem_id] += 1
 
     # 加载记忆内容
     results = []
@@ -1821,6 +1877,16 @@ def keyword_search(query, memory_dir, limit=20):
         records = load_jsonl(memory_dir / f"layer2/active/{mem_type}.jsonl")
         for r in records:
             all_memories[r["id"]] = r
+
+    # BM25 索引由 rebuild_index 生成;旧数据目录还没有时现场构建
+    bm25_path = memory_dir / "layer2/index/bm25.json"
+    if bm25_path.exists():
+        with open(bm25_path, encoding="utf-8") as f:
+            index = json.load(f)
+    else:
+        index = build_bm25_index([(i, r.get("content", "")) for i, r in all_memories.items()])
+    memory_scores = bm25_scores(query, index)
+    top = max(memory_scores.values(), default=0.0)
 
     # 排序并返回
     sorted_ids = sorted(memory_scores.keys(), key=lambda x: memory_scores[x], reverse=True)
@@ -1831,6 +1897,8 @@ def keyword_search(query, memory_dir, limit=20):
                 {
                     "id": mem_id,
                     "score": memory_scores[mem_id],
+                    # 相关度归一到 (0, 1]:本次查询的最佳匹配为 1
+                    "relevance": memory_scores[mem_id] / top if top else 0.0,
                     "content": mem.get("content", ""),
                     "importance": mem.get("importance", 0.5),
                     "memory_score": mem.get("score", 0.5),
@@ -1889,6 +1957,7 @@ def entity_search(query, memory_dir, limit=20):
                 {
                     "id": mem_id,
                     "score": len([e for e in matched_entities if e in mem.get("entities", [])]),
+                    "relevance": min(1.0, 0.5 * len([e for e in matched_entities if e in mem.get("entities", [])])),
                     "content": mem.get("content", ""),
                     "importance": mem.get("importance", 0.5),
                     "memory_score": mem.get("score", 0.5),
@@ -1929,9 +1998,14 @@ def rerank_results(results, query, limit, memory_dir=None):
         recency = math.exp(-decay_lambda * days_ago)
 
         importance = r.get("importance", 0.5)
-        relevance = r.get("score", 0) * 0.5 + r.get("memory_score", 0.5) * 0.5
+        # 各检索路径给出 0~1 的 relevance;没有的旧来源按原分数截断兜底
+        relevance = r.get("relevance")
+        if relevance is None:
+            relevance = min(1.0, r.get("score", 0))
 
-        r["final_score"] = 0.35 * recency + 0.35 * importance + 0.30 * relevance
+        # 相关度为主:旧版 新近度 0.35 + 重要性 0.35 + 相关度 0.30,
+        # 一条重要性高的长消息对任何查询都能排到前面
+        r["final_score"] = 0.6 * relevance + 0.2 * importance + 0.1 * recency + 0.1 * r.get("memory_score", 0.5)
 
     # 2. v1.1.5: 实体隔离(竞争性抑制)
     if V1_1_5_ENABLED and results:
@@ -2603,6 +2677,7 @@ def semantic_search(query, memory_dir, store, limit=20):
         {
             "id": r["id"],
             "score": sim,
+            "relevance": sim,
             "content": r.get("content", ""),
             "importance": r.get("importance", 0.5),
             "memory_score": r.get("score", 0.5),
@@ -3122,6 +3197,15 @@ def rebuild_index(memory_dir):
     with open(memory_dir / "layer2/index/relations.json", "w", encoding="utf-8") as f:
         json.dump(relations_index, f, indent=2, ensure_ascii=False)
 
+    # BM25 索引(keyword_search 使用)
+    bm25_records = [
+        (r["id"], r.get("content", ""))
+        for mem_type in ["facts", "beliefs", "summaries"]
+        for r in load_jsonl(memory_dir / f"layer2/active/{mem_type}.jsonl")
+    ]
+    with open(memory_dir / "layer2/index/bm25.json", "w", encoding="utf-8") as f:
+        json.dump(build_bm25_index(bm25_records), f, ensure_ascii=False)
+
     # 语义向量(可选):只为新增或改写的记忆计算
     store = get_vector_store(memory_dir)
     if store:
@@ -3372,7 +3456,6 @@ def cmd_consolidate(args):
 
             for mem_type in ["facts", "beliefs", "summaries"]:
                 active_path = memory_dir / f"layer2/active/{mem_type}.jsonl"
-                archive_path = memory_dir / f"layer2/archive/{mem_type}.jsonl"
 
                 records = load_jsonl(active_path)
 
@@ -3395,22 +3478,17 @@ def cmd_consolidate(args):
                     r["score"] = r.get("score", importance) * _math.exp(-effective_rate * days)
                     r["last_decayed"] = now_iso()
 
-                remaining = []
-                to_archive = []
-
+                # 衰减只影响排序,不再移入归档池:人会淡忘,但给了线索还能想起来。
+                # 分数低于阈值的记忆标记为 dormant(仍参与检索,排序靠后)
                 for r in records:
-                    if r.get("score", 0) < archive_threshold:
-                        to_archive.append(r)
+                    dormant = r.get("score", 0) < archive_threshold
+                    if dormant and not r.get("dormant"):
                         archived_count += 1
-                    else:
-                        remaining.append(r)
+                    r["dormant"] = dormant
 
-                save_jsonl(active_path, remaining)
-                if to_archive:
-                    existing = load_jsonl(archive_path)
-                    save_jsonl(archive_path, existing + to_archive)
+                save_jsonl(active_path, records)
 
-            print(f"   衰减完成,归档 {archived_count} 条")
+            print(f"   衰减完成,新淡忘 {archived_count} 条(仍可检索)")
             print("   ✅ 完成")
 
         # Phase 6: 索引更新
@@ -4006,6 +4084,7 @@ def search_pending(query: str, memory_dir=None) -> list:
             record_copy["score"] = record.get("importance", 0.5)
             record_copy["final_score"] = record.get("importance", 0.5)
             record_copy["match_score"] = score / len(query_words) if query_words else 0
+            record_copy["relevance"] = record_copy["match_score"]
             record_copy["match_source"] = "pending"
             record_copy["entities"] = []
             results.append(record_copy)

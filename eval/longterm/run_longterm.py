@@ -3,7 +3,8 @@
 长期记忆端到端评测：Agent 能不能像人一样记住过去的对话
 
 流程（每条时间线）：
-1. 按天回放对话：每句用户消息 add-pending，每天结束 consolidate（MEMORY_NOW 固定为当天）
+1. 按天回放对话：用户和 AI 的每句话 add-pending（AI 的带 --source assistant），每天结束 consolidate
+   （MEMORY_NOW 固定为当天）；--user-only 只写用户的话（插件旧行为）
 2. 最后一天之后提问：Agent 只能看到 search --json 检索到的记忆（带日期），据此回答
 3. LLM 按标准答案判对错；"没提过的事"答"不记得"才算对
 
@@ -36,7 +37,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from adapters import LOADERS  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-MEMORY_PY = REPO_ROOT / "src" / "memory.py"
+# MEMORY_PY_OVERRIDE 可指向另一份代码（如对比改动前后的快照）
+MEMORY_PY = Path(os.environ.get("MEMORY_PY_OVERRIDE") or REPO_ROOT / "src" / "memory.py")
 SEMANTIC_ENV = ("MEMORY_EMBEDDING_PROVIDER", "MEMORY_EMBEDDING_MODEL_DIR", "MEMORY_EMBEDDING_QUERY_PREFIX")
 
 CONFIGS = {
@@ -125,7 +127,7 @@ def replay(timeline, cfg, memory_dir, ingest_roles, archive_threshold=None):
             if turn["role"] in ingest_roles and turn["text"].strip():
                 minute = min(i, 59 * 8)
                 now = f"{session['date']}T{10 + minute // 60:02d}:{minute % 60:02d}:00Z"
-                cli(memory_dir, now, env, "add-pending", turn["text"])
+                cli(memory_dir, now, env, "add-pending", turn["text"], "--source", turn["role"])
         cli(memory_dir, f"{session['date']}T23:00:00Z", env, "consolidate", "--force")
 
 
@@ -271,7 +273,7 @@ def main():
     ap.add_argument("--configs", default="no_memory,full_context,rule,semantic,semantic_judge")
     ap.add_argument("--model", default="deepseek-flash")
     ap.add_argument("--k", type=int, default=10, help="每题检索的记忆条数")
-    ap.add_argument("--ingest-assistant", action="store_true", help="AI 的回复也写入记忆（默认只写用户的话）")
+    ap.add_argument("--user-only", action="store_true", help="只写入用户的话（插件旧行为；默认用户和 AI 都写入）")
     ap.add_argument("--jobs", type=int, default=6)
     ap.add_argument("--archive-threshold", type=float, help="覆盖衰减归档阈值（默认用系统配置 0.05；0 表示不因衰减归档）")
     ap.add_argument("--cache", default=str(Path(tempfile.gettempdir()) / "longterm-llm-cache"))
@@ -286,7 +288,7 @@ def main():
         timelines += json.loads(Path(args.timelines).read_text(encoding="utf-8"))
     ensure_gold(llm, timelines)
 
-    roles = {"user", "assistant"} if args.ingest_assistant else {"user"}
+    roles = {"user"} if args.user_only else {"user", "assistant"}
     work_dir = Path(tempfile.mkdtemp(prefix="longterm-"))
     all_results, all_stats = {}, {}
     for config in args.configs.split(","):
@@ -299,7 +301,7 @@ def main():
         done = all_results[config]
         print(f"[{config}] {sum(r['correct'] for r in done)}/{len(done)}", file=sys.stderr)
 
-    print(f"模型: {args.model}，检索条数 k={args.k}，写入: {'用户+AI' if args.ingest_assistant else '仅用户'}\n")
+    print(f"模型: {args.model}，检索条数 k={args.k}，写入: {'仅用户' if args.user_only else '用户+AI'}\n")
     report(all_results)
     if args.out:
         Path(args.out).write_text(

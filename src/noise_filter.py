@@ -138,6 +138,9 @@ class NoiseFilter:
         '过敏', '生日', '其实是',
     ]
     
+    # 回忆型提问开头
+    RECALL_QUESTION = r'^(你)?(还)?(记得|记不记得|还记不记得)'
+    
     # 疑问句结尾（问号、吗/呢、以及"怎么样""多少"等疑问词收尾）
     QUESTION_PATTERN = r'([?？]|(吗|呢|怎么样|如何|多少|几点|为什么|哪个|哪里)[。.!！]*)\s*$'
     
@@ -227,6 +230,12 @@ class NoiseFilter:
             self.stats['by_keyword'] += 1
             return True
         
+        # 1.2b 回忆型提问（"你还记得……吗"）是在问记忆，不是在提供事实
+        if re.match(self.RECALL_QUESTION, content) and re.search(self.QUESTION_PATTERN, content):
+            self.stats['filtered'] += 1
+            self.stats['by_conversation'] += 1
+            return True
+
         # 1.3 对话类型噪声：寒暄/应答开头且不含事实；或不含事实的提问
         if self._match_patterns(content, self.CONVERSATION_NOISE) or re.search(self.QUESTION_PATTERN, content):
             if not self._has_fact(content):

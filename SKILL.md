@@ -31,6 +31,10 @@ python3 {baseDir}/src/memory.py <command> ...
 **可以先缓冲**（用 `add-pending`，等 `consolidate` 批量处理）：对话中顺带提到、
 重要性不确定的信息。
 
+**你自己说过的也要记**：你给用户的具体推荐、建议、答应过的事，用户以后会问"你上次推荐的是哪本书"。
+用 `add-pending --source assistant` 写入，系统会标成"（AI 说）"，它不会更正或覆盖用户自己的记忆。
+OpenClaw 会话由 `src/collect_from_sessions.py` 自动收集，默认连同 AI 回复一起收（"好的""明白"这类短应答不记）。
+
 **不要记**：寒暄（"好的"、"哈哈"）、一次性查询（天气、计算、翻译）、
 你自己的推测（除非用 `--type belief` 并给出 `--confidence`）、密码和密钥。
 系统也会自动拒绝寒暄、不含事实的提问，以及密码、密钥、证件号等敏感信息（`capture` 会说明原因）。
@@ -41,6 +45,7 @@ python3 {baseDir}/src/memory.py <command> ...
 python3 {baseDir}/src/memory.py capture "我对花生过敏"
 python3 {baseDir}/src/memory.py capture --type belief --confidence 0.6 "用户可能在准备考研"
 python3 {baseDir}/src/memory.py add-pending "周末去爬了香山"
+python3 {baseDir}/src/memory.py add-pending --source assistant "推荐用户读《百年孤独》"
 ```
 
 ## 什么时候检索
@@ -65,7 +70,8 @@ python3 {baseDir}/src/memory.py get f_20261028_477300      # 需要细节时按 
 ## 定期整理
 
 `consolidate` 跑完整的 7 阶段整理：处理 pending、去重、更正失效、生成摘要、
-时间衰减、标记已过去的事件、生成 Layer 1 快照。建议每天一次（同一天重复运行会自动跳过，
+时间衰减、标记已过去的事件、生成 Layer 1 快照。很久不提的记忆会淡忘（排序靠后），
+但不会消失，用户给出线索时仍能检索到。建议每天一次（同一天重复运行会自动跳过，
 `--force` 强制执行）：
 
 ```bash
