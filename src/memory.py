@@ -751,6 +751,16 @@ def calculate_importance(content):
     return final_score, category
 
 
+# AI 回复里"好嘞""明白"这类短应答不记
+ASSISTANT_MIN_CHARS = 15
+_REPLY_DIRECTIVE = re.compile(r"\[\[[a-z_:]+\]\]\s*")
+
+
+def clean_assistant_text(text):
+    """去掉 OpenClaw 的回复指令标记(如 [[reply_to_current]])"""
+    return _REPLY_DIRECTIVE.sub("", text).strip()
+
+
 def rule_filter(segments, threshold=0.3, use_llm_fallback=True):
     """
     Phase 2: 重要性筛选(v1.1.7:智能 LLM 集成)
@@ -774,6 +784,11 @@ def rule_filter(segments, threshold=0.3, use_llm_fallback=True):
         content = segment.get("content", "") if isinstance(segment, dict) else segment
         source = segment.get("source", "unknown") if isinstance(segment, dict) else "unknown"
         created = segment.get("created") if isinstance(segment, dict) else None
+        if source == "assistant":
+            content = clean_assistant_text(content)
+            if len(content) < ASSISTANT_MIN_CHARS:
+                noise_skipped += 1
+                continue
 
         # v1.2.0: 前置废话过滤(跳过明显废话,不进入 LLM)
         is_noise_content, noise_category = is_noise(content)
@@ -3930,6 +3945,8 @@ def add_to_pending(memory_dir, content: str, source: str = "user") -> dict:
 
     返回添加的记录
     """
+    if source == "assistant":
+        content = clean_assistant_text(content)
     is_urgent, importance, category = check_urgency(content)
 
     record = {

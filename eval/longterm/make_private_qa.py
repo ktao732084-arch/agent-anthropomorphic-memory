@@ -114,6 +114,9 @@ def main():
 
     llm = LLM(args.model, Path(args.cache))
     tl = json.loads(Path(args.timeline).read_text(encoding="utf-8"))[0]
+    # 出题和核验只看用户的话
+    tl = {**tl, "sessions": [{**s, "turns": [t for t in s["turns"] if t["role"] == "user"]} for s in tl["sessions"]]}
+    tl["sessions"] = [s for s in tl["sessions"] if s["turns"]]
     first, last = tl["sessions"][0]["date"], tl["sessions"][-1]["date"]
     today = (date.fromisoformat(last) + timedelta(days=1)).isoformat()
 

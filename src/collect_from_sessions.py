@@ -96,6 +96,10 @@ def user_text(raw):
     return text
 
 
+# OpenClaw 回复指令标记，如 [[reply_to_current]]
+_REPLY_DIRECTIVE = re.compile(r'\[\[[a-z_:]+\]\]\s*')
+
+
 def extract_messages(session_file, hours=24, include_assistant=True):
     """提取用户原话和 AI 对外回复；不采集工具调用、工具输出或思考块。"""
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours) if hours else None
@@ -134,7 +138,7 @@ def extract_messages(session_file, hours=24, include_assistant=True):
                     raw = '\n'.join(
                         item.get('text', '') for item in content if isinstance(item, dict) and item.get('type') == 'text'
                     )
-                text = user_text(raw) if role == 'user' else raw.strip()
+                text = user_text(raw) if role == 'user' else _REPLY_DIRECTIVE.sub('', raw).strip()
                 if role == 'assistant' and text in {'NO_REPLY', 'HEARTBEAT_OK'}:
                     continue
                 # 太短的通常是"好的""嗯",交给 memory.py 的噪声过滤也行,这里先挡掉单字

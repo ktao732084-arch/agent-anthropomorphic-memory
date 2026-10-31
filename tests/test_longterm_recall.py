@@ -91,7 +91,8 @@ class CollectorTests(unittest.TestCase):
                     msg("assistant", [{"type": "thinking", "thinking": "internal secret"},
                                       {"type": "toolCall", "name": "exec", "arguments": {}},
                                       {"type": "text", "text": "建议阅读天文学入门。"}]),
-                    msg("toolResult", "tool output"), msg("assistant", "HEARTBEAT_OK")]
+                    msg("toolResult", "tool output"), msg("assistant", "HEARTBEAT_OK"),
+                    msg("assistant", "[[reply_to_current]]")]
             file = sessions / "s.jsonl"
             write_rows(file, rows)
             self.assertEqual([m["source"] for m in extract_messages(file, None)], ["user", "assistant", "assistant"])
@@ -137,6 +138,14 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(result[0]["source"], "assistant")
         self.assertTrue(result[0]["content"].startswith("AI 回复："))
         self.assertIn("AI 回复：", (self.path / "layer1/snapshot.md").read_text(encoding="utf-8"))
+
+    def test_assistant_reply_directive_stripped_and_short_acks_skipped(self):
+        self.cli("add-pending", "[[reply_to_current]] 好嘞！", "--source", "assistant")
+        self.cli("add-pending", "[[reply_to_current]] 我推荐你看《百年孤独》，很适合你现在的状态", "--source", "assistant")
+        self.assertNotIn("[[", (self.path / "layer2/pending.jsonl").read_text(encoding="utf-8"))
+        self.cli("consolidate", "--force")
+        contents = [r["content"] for r in memory.load_jsonl(self.path / "layer2/active/facts.jsonl")]
+        self.assertEqual(contents, ["AI 回复：我推荐你看《百年孤独》，很适合你现在的状态"])
 
     def test_decay_ignores_legacy_threshold_but_manual_archive_still_works(self):
         cfg_path = self.path / "config.json"

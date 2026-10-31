@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-从 session-archive（OpenClaw / Claude Code / Codex 会话归档）提取用户本人说过的话，
+从 session-archive（OpenClaw / Claude Code / Codex 会话归档）提取对话，
 合并成一条按时间排序的统一格式时间线（questions 为空，由 make_private_qa.py 生成）。
+OpenClaw 会话同时收 AI 的回复（与插件收集器一致，回放时可用 run_longterm.py --user-only 去掉）；
+Claude Code / Codex 的 AI 输出主要是代码和工具操作，只收用户的话。
 
     python3 eval/longterm/extract_sessions.py ARCHIVE_DIR OUT.json [--openclaw-dirs tkao-vps/sessions,...]
 
-只收用户原话：去掉渠道元数据外壳、系统事件、命令输出、系统提醒、工具结果；
+用户的话：去掉渠道元数据外壳、系统事件、命令输出、系统提醒、工具结果；
 超过 MAX_CHARS 的大段粘贴（日志、文档）不算对话，跳过。
 """
 
@@ -44,12 +46,19 @@ def _text(content):
 
 
 def openclaw_messages(path):
+    """OpenClaw 会话里用户和 AI 的话（与插件收集器一致：AI 回复也收）"""
     for r in _records(path):
         m = r.get("message")
-        if r.get("type") == "message" and isinstance(m, dict) and m.get("role") == "user":
+        if r.get("type") != "message" or not isinstance(m, dict):
+            continue
+        if m.get("role") == "user":
             text = user_text(_text(m.get("content")))
             if text:
-                yield r.get("timestamp", ""), text, "openclaw"
+                yield r.get("timestamp", ""), text, "openclaw", "user"
+        elif m.get("role") == "assistant":
+            text = _text(m.get("content")).strip()
+            if text:
+                yield r.get("timestamp", ""), text, "openclaw", "assistant"
 
 
 def claude_code_messages(path):
@@ -61,7 +70,7 @@ def claude_code_messages(path):
             continue
         text = _SYSTEM_REMINDER.sub("", _text(content)).strip()
         if text and not text.startswith(_CC_SKIP):
-            yield r.get("timestamp", ""), text, "claude-code"
+            yield r.get("timestamp", ""), text, "claude-code", "user"
 
 
 def codex_messages(path):
@@ -70,7 +79,7 @@ def codex_messages(path):
         if r.get("type") == "event_msg" and isinstance(p, dict) and p.get("type") == "user_message":
             text = (p.get("message") or "").strip()
             if text and not text.startswith(_CODEX_SKIP):
-                yield r.get("timestamp", ""), text, "codex"
+                yield r.get("timestamp", ""), text, "codex", "user"
 
 
 def build_timeline(archive: Path, openclaw_dirs):
@@ -87,14 +96,14 @@ def build_timeline(archive: Path, openclaw_dirs):
     seen = set()
     by_day = defaultdict(list)
     skipped_long = 0
-    for ts, text, src in sorted(messages):
+    for ts, text, src, role in sorted(messages):
         if not ts[:10] or (text, ts[:10]) in seen:
             continue
         seen.add((text, ts[:10]))
         if len(text) > MAX_CHARS:
             skipped_long += 1
             continue
-        by_day[ts[:10]].append({"role": "user", "speaker": "user", "text": text, "source": src, "time": ts})
+        by_day[ts[:10]].append({"role": role, "speaker": role, "text": text, "source": src, "time": ts})
     sessions = [{"date": day, "turns": turns} for day, turns in sorted(by_day.items())]
     return {"id": "private-user", "source": "private", "user": "user", "sessions": sessions, "questions": []}, skipped_long
 
@@ -110,10 +119,10 @@ def main():
     turns = [t for s in tl["sessions"] for t in s["turns"]]
     by_src = defaultdict(int)
     for t in turns:
-        by_src[t["source"]] += 1
+        by_src[f"{t['source']}/{t['role']}"] += 1
     print(
         f"{len(tl['sessions'])} 天（{tl['sessions'][0]['date']} ~ {tl['sessions'][-1]['date']}），"
-        f"{len(turns)} 条用户消息 {dict(by_src)}，共 {sum(len(t['text']) for t in turns)} 字；跳过超长粘贴 {skipped} 条"
+        f"{len(turns)} 条消息 {dict(by_src)}，共 {sum(len(t['text']) for t in turns)} 字；跳过超长粘贴 {skipped} 条"
     )
 
 
